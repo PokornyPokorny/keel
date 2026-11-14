@@ -16,6 +16,12 @@
 <style>
   html, body { margin: 0; height: 100%; background:#000; color: #fff; }
   [hidden] { display: none !important; } /* .screen sets display, which would otherwise beat the hidden attribute */
+  /* Nothing that fits on one screen moves: no rubber-band on the app, no page scroll behind a layer or sheet,
+     no panning of full-screen surfaces. Scrolling layers (Photos, Money settings) and sheets scroll themselves. */
+  html, body { overscroll-behavior: none; }
+  html.frozen, html.frozen body { overflow: hidden; }
+  .screen, .layer:not(.scroll):not(.sheet-layer) { touch-action: none; }
+  .layer.scroll, .mny .sheet { overscroll-behavior: contain; }
   body { font: 17px/1.4 -apple-system, system-ui, sans-serif; }
 
   .screen {
@@ -267,6 +273,10 @@
   });
   // Money is Keel's home; photo a day lives behind its Photos link (and its daily prompt).
   const money = startMoney({ root: $('money-root'), onPhotos: () => photos.openHome() });
+  // Freeze the page whenever a one-screen view is up: the code and lock screens, or any open layer or sheet.
+  const freeze = () => document.documentElement.classList.toggle('frozen', $('app').hidden || !!$('app').querySelector('.layer:not([hidden])'));
+  new MutationObserver(freeze).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
+  freeze();
   function show(id) {
     screens.forEach(s => $(s).hidden = s !== id);
     if (id === 'app') { money.refresh(); photos.refresh(); }

@@ -5,6 +5,8 @@ import { launch } from './harness.mjs';
 import { fixture, TOKENS, PEOPLE, NOW } from './fixtures/up-fixture.mjs';
 
 const local = process.argv[2] === 'local';
+// The page itself can't scroll (only a scrolling layer or sheet can).
+const locked = "getComputedStyle(document.documentElement).overflow === 'hidden' && getComputedStyle(document.body).overflow === 'hidden'";
 let passed = 0, total = 0;
 async function check(id, fn) {
   total++;
@@ -153,6 +155,14 @@ async function screens() {
     const parents = await H.eval(`[...document.querySelectorAll('#money .feed [data-tx]')].map(e => e.dataset.parent)`);
     assert.ok(parents.length > 0 && parents.every(p => p === 'transport'), parents.join(','));
     await click(H, '#money .chip[data-cat=""]');
+  });
+  await check('U16 an open sheet freezes the page behind it but scrolls itself', async () => {
+    await H.eval(`document.getElementById('prompt-close')?.click()`);
+    await click(H, '#money [data-tx="a-woo-5"]');
+    assert.ok(await H.waitFor(`${locked}`, 2000), 'page frozen behind the sheet');
+    assert.equal(await H.eval(`getComputedStyle(document.querySelector('#m-sheet .sheet')).overflowY`), 'auto', 'sheet scrolls');
+    await click(H, '#m-sheet-close');
+    assert.ok(await H.waitFor(`!(${locked})`, 2000), 'page scrolls again');
   });
   await check('U11 balance over time for a saver', async () => {
     await click(H, '#money [data-acct="a-holiday"]');

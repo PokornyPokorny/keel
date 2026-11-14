@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { launch, makeJpeg, jpegInfo } from './harness.mjs';
 
 const local = process.argv[2] === 'local';
+// The page itself can't scroll (only a scrolling layer or sheet can).
+const locked = "getComputedStyle(document.documentElement).overflow === 'hidden' && getComputedStyle(document.body).overflow === 'hidden'";
 let passed = 0, total = 0;
 async function check(id, fn) {
   total++;
@@ -513,6 +515,15 @@ async function prompt() {
   await check('P1 before 6pm: the prompt covers Money, with an ×', async () => {
     assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000), 'prompt shown');
     assert.equal(await closeShown(H), true);
+  });
+  await check('P11 nothing scrolls under the prompt; once it is gone, Money scrolls again', async () => {
+    assert.ok(await H.eval(`${locked}`), 'page locked under the prompt');
+    assert.equal(await H.eval(`getComputedStyle(document.getElementById('prompt')).touchAction`), 'none');
+    assert.equal(await H.eval(`getComputedStyle(document.documentElement).overscrollBehaviorY`), 'none', 'no rubber-band');
+    await H.eval(`document.getElementById('prompt-close').click()`);
+    assert.ok(await H.waitFor(`!(${locked})`, 2000), 'Money scrolls');
+    await H.reload(); await H.signIn();
+    await H.waitFor(`!document.getElementById('prompt').hidden`, 6000);
   });
   await check('P2 × dismisses for this open only; the next open shows it again', async () => {
     await H.eval(`document.getElementById('prompt-close').click()`);

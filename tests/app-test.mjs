@@ -14,6 +14,8 @@ const enterToken = t => H.eval(`(()=>{document.querySelector('#token input').val
 
 await H.open('?t=' + Date.now()); await H.wait(1500);
 await log('first open');
+const frozen = await H.eval(`getComputedStyle(document.documentElement).overflow === 'hidden' && getComputedStyle(document.getElementById('token')).touchAction === 'none'`);
+if (!frozen) console.log('NOT FROZEN: the code screen can scroll');
 await enterToken(BAD); await H.wait(1000);
 await log('bad code');
 await enterToken(GOOD); await H.wait(1000);
