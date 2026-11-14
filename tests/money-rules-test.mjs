@@ -65,6 +65,12 @@ const cases = {
     const ids = R.liveRoundups(txns, new Set(accounts.map(a => a.id))).map(t => t.id);
     assert.deepEqual(ids, ['a-ru-1']);
   },
+  'stamp: the fresher pull wins for a shared (joint) account': () => {
+    const ja = c => ({ id: 'j', attributes: { ownershipType: 'JOINT', balance: { valueInBaseUnits: c } } });
+    const { accounts } = R.stamp([{ who: 'me', syncedAt: '2026-11-01T00:00:00Z', accounts: [ja(100)], transactions: [] },
+                                  { who: 'partner', syncedAt: '2026-11-14T00:00:00Z', accounts: [ja(200)], transactions: [] }]);
+    assert.equal(accounts[0].attributes.balance.valueInBaseUnits, 200);
+  },
   'cents': () => assert.equal(R.cents(byId(both().txns, 'a-woo-5')), -3420),
 
   // ---- Task 3 ----

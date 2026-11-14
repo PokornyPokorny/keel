@@ -42,7 +42,7 @@ export const attachmentUrl = async (token, id) => (await get(token, API + 'attac
 // newest stored transaction. One person's failure never touches the other's stored data.
 export async function sync({ tokens, now = new Date(), force = false }) {
   const stored = await store.load();
-  const lastFull = { ...(stored.meta.lastFull ?? {}) };
+  const lastFull = { ...(stored.meta.lastFull ?? {}) }, lastSync = { ...(stored.meta.lastSync ?? {}) };
   const status = {};
   let fullDone = false;
   for (const who of ['me', 'partner']) {
@@ -64,6 +64,7 @@ export async function sync({ tokens, now = new Date(), force = false }) {
         await store.mergeRecent(who, accounts, txns, since);
       }
       status[who] = 'ok';
+      lastSync[who] = now.toISOString();
     } catch (e) {
       if (!(e instanceof UpError)) throw e;
       status[who] = e.code === 'unauthorized' ? 'rejected' : 'offline';
@@ -81,6 +82,7 @@ export async function sync({ tokens, now = new Date(), force = false }) {
     updatedAt = now.toISOString();
     await store.setMeta('updatedAt', updatedAt);
     await store.setMeta('lastFull', lastFull);
+    await store.setMeta('lastSync', lastSync);
   }
   return { status, updatedAt };
 }

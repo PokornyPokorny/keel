@@ -47,7 +47,7 @@ export function startMoney({ root, onPhotos }) {
   // ---- data: the phone's copy, stamped and paired once per load ----
   async function loadData() {
     const d = await store.load(), t = tokens();
-    const pulls = ['me', 'partner'].filter(w => d.pulls[w] && t[w]).map(w => ({ who: w, ...d.pulls[w] }));
+    const pulls = ['me', 'partner'].filter(w => d.pulls[w] && t[w]).map(w => ({ who: w, ...d.pulls[w], syncedAt: d.meta.lastSync?.[w] }));
     if (!pulls.length) return null;
     const st = R.stamp(pulls);
     R.pairBetween(st.txns, people());
@@ -59,27 +59,33 @@ export function startMoney({ root, onPhotos }) {
     if (!t.me && !t.partner) { S.data = null; render(); return; }
     try { S.data = await loadData(); } catch { S.data = null; }
     render();
-    if (S.syncing) {                                  // a sync is running: if the tokens changed since, sync again after it
-      const before = S.syncTokens;
-      return S.syncing.then(() => JSON.stringify(tokens()) !== before ? refresh() : undefined);
-    }
-    S.syncTokens = JSON.stringify(t);
-    S.syncing = (async () => {
-      try {
-        const res = await up.sync({ tokens: t, now: new Date() });
-        ls.set(K.status, JSON.stringify(res.status));
-        S.offline = !Object.values(res.status).includes('ok');
-        S.data = await loadData();
-      } catch { S.offline = true; }
-      finally { S.syncing = null; }
+    return runSync(false);
+  }
+
+  // Syncs run one at a time, each with the tokens as they are when it starts. A token removed while a sync
+  // was running gets its data dropped again afterwards, so Remove always sticks.
+  function runSync(force) {
+    S.syncing = (S.syncing ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const t = tokens();
+      if (t.me || t.partner) {
+        try {
+          const res = await up.sync({ tokens: t, now: new Date(), force });
+          ls.set(K.status, JSON.stringify(res.status));
+          S.offline = !Object.values(res.status).includes('ok');
+        } catch { S.offline = true; }
+      }
+      for (const w of ['me', 'partner']) if (!tokens()[w]) await store.forget(w).catch(() => {});
+      try { S.data = await loadData(); } catch {}
       render();
       if (!settings.hidden) renderSettings();
-    })();
+    });
     return S.syncing;
   }
 
   // ---- freshness line ----
   function fresh() {
+    const st = ls.json(K.status, {}), rejected = ['me', 'partner'].filter(w => tokens()[w] && st[w] === 'rejected');
+    if (rejected.length) return `Up rejected ${rejected.map(w => esc(first(w)) + "'s").join(' and ')} token · <button type="button" class="inline-link" data-act="settings">Money settings</button>`;
     if (!S.data?.updatedAt) return S.offline ? 'Offline' : 'Updating…';
     const at = new Date(S.data.updatedAt), mins = Math.floor((Date.now() - at) / 60000);
     const when = mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : dayKey(at) === dayKey(new Date()) ? time12(at) : short(at);
@@ -155,7 +161,7 @@ export function startMoney({ root, onPhotos }) {
       ${monthGrid(month).flat().map(k => {
         if (!k) return '<span class="blank"></span>';
         const c = day.byDay[k] ?? 0, lvl = c / maxDay, future = current && k > dayKey(now);
-        return `<span${future || !c ? '' : ` style="background:color-mix(in srgb,var(--spend) ${Math.round(8 + lvl * 92)}%,#161618)${lvl > .55 ? ';color:#000' : ''}"`} title="${k}: ${money(c)}">${Number(k.slice(8))}</span>`;
+        return `<span${future || !c ? '' : ` style="background:color-mix(in srgb,var(--spend) ${Math.round(8 + lvl * 92)}%,#161618)${lvl > .7 ? ';color:#000' : ''}"`} title="${k}: ${money(c)}">${Number(k.slice(8))}</span>`;
       }).join('')}</div>
       <div class="legend"><span>${day.highest.day ? `Highest: ${DOW[new Date(day.highest.day + 'T12:00').getDay()]} ${short(new Date(day.highest.day + 'T12:00'))} · ${money(day.highest.cents)}` : 'Nothing spent yet'}</span><span>Average ${money(day.average)} a day</span></div></div>`;
 
@@ -220,7 +226,7 @@ export function startMoney({ root, onPhotos }) {
 
     screen.innerHTML = `${top}${whose}
       <div class="month"><button type="button" data-act="month" data-d="-1" aria-label="${esc(monthName(prev))}">‹</button>
-        <span>${esc(monthName(month))} ${month.slice(0, 4)}<small>${esc(fresh())}</small></span>
+        <span>${esc(monthName(month))} ${month.slice(0, 4)}<small>${fresh()}</small></span>
         <button type="button" data-act="month" data-d="1" aria-label="Next month"${current ? ' disabled' : ''}>›</button></div>
       ${hero}${tiles}${chart}${where}${heat}${savers}${joint}${feed}${two}${foot}`;
   }
@@ -252,7 +258,11 @@ export function startMoney({ root, onPhotos }) {
         ${kv('Cashback', a.cashback ? `${money(Number(a.cashback.amount.valueInBaseUnits))} · ${esc(a.cashback.description)}` : none)}
         ${kv('Foreign', fx ? `${esc(fx.currencyCode)} ${(Math.abs(Number(fx.valueInBaseUnits)) / 100).toFixed(2)}` : none)}
         ${kv('Account', acct ? `${esc(acct.attributes.displayName)} · ${esc(first(acct.owner))}` : '<span class="muted">A closed account</span>')}
-        ${to ? kv('Transfer', esc(to.attributes.displayName)) : ''}
+        ${rel.transferAccount?.data?.id ? kv('Transfer', to ? esc(to.attributes.displayName) : '<span class="muted">A closed account</span>') : ''}
+        ${kv('Type', a.transactionType ? esc(a.transactionType) : none)}
+        ${a.performingCustomer?.displayName ? kv('Made by', esc(a.performingCustomer.displayName)) : ''}
+        ${a.holdInfo ? kv('Hold', `${money(Math.abs(Number(a.holdInfo.amount.valueInBaseUnits)))}${a.holdInfo.foreignAmount ? ` · ${esc(a.holdInfo.foreignAmount.currencyCode)} ${(Math.abs(Number(a.holdInfo.foreignAmount.valueInBaseUnits)) / 100).toFixed(2)}` : ''}`) : ''}
+        ${a.roundUp?.boostPortion ? kv('Round-up boost', money(Math.abs(Number(a.roundUp.boostPortion.valueInBaseUnits))), 'save') : ''}
         ${kv('Bank text', a.rawText ? `<span class="muted">${esc(a.rawText)}</span>` : none)}
         ${kv('Message', a.message ? esc(a.message) : none)}
         ${kv('Note', a.note?.text ? esc(a.note.text) : none)}
@@ -375,13 +385,11 @@ export function startMoney({ root, onPhotos }) {
     else if (act === 'remove') {
       const w = el.dataset.w;
       ls.del(K[w]); await store.forget(w).catch(() => {});
-      S.view = 'all'; await refresh(); renderSettings();
+      S.view = 'all'; renderSettings(); await runSync(false); renderSettings();
     }
     else if (act === 'refresh-all') {
       el.disabled = true; el.textContent = 'Refreshing…';
-      try { const res = await up.sync({ tokens: tokens(), now: new Date(), force: true }); ls.set(K.status, JSON.stringify(res.status)); S.offline = !Object.values(res.status).includes('ok'); S.data = await loadData(); }
-      catch { S.offline = true; }
-      render(); renderSettings();
+      await runSync(true);
     }
   });
 

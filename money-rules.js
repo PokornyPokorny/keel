@@ -8,12 +8,18 @@ const accountOf = t => t.relationships?.account?.data?.id ?? null;
 const localMidnight = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const dayGap = (a, b) => Math.round((localMidnight(when(b)) - localMidnight(when(a))) / 864e5);
 
-// Each person's pull -> accounts and transactions, each id once. A JOINT account belongs to 'joint';
+// Each person's pull -> accounts and transactions, each id once (a shared account comes from the most recently
+// synced pull, so a person whose token stopped working can't hold its balance back). A JOINT account belongs to 'joint';
 // a transaction in a joint account, or seen by both tokens, is 'joint'; otherwise it is whose token saw it.
 export function stamp(pulls) {
-  const accounts = new Map(), txns = new Map();
-  for (const { who, accounts: accs, transactions } of pulls) {
-    for (const a of accs) if (!accounts.has(a.id)) accounts.set(a.id, { ...a, owner: a.attributes.ownershipType === 'JOINT' ? 'joint' : who });
+  const accounts = new Map(), txns = new Map(), from = new Map();
+  for (const { who, accounts: accs, transactions, syncedAt } of pulls) {
+    const at = syncedAt ? new Date(syncedAt).getTime() : -Infinity;
+    for (const a of accs) {
+      if (accounts.has(a.id) && !(at > from.get(a.id))) continue;
+      accounts.set(a.id, { ...a, owner: a.attributes.ownershipType === 'JOINT' ? 'joint' : who });
+      from.set(a.id, at);
+    }
     for (const t of transactions) {
       if (txns.has(t.id)) txns.get(t.id).owner = 'joint';
       else txns.set(t.id, { ...t, owner: who });

@@ -25,12 +25,13 @@ function tx(id, account, cents, createdAt, o = {}) {
     type: 'transactions', id,
     attributes: {
       status: o.held ? 'HELD' : 'SETTLED', rawText: o.raw ?? null, description: o.desc ?? 'Something', message: o.message ?? null,
-      isCategorizable: o.categorizable ?? true, holdInfo: null,
+      isCategorizable: o.categorizable ?? true,
       roundUp: o.roundUp ? { amount: { currencyCode: 'AUD', value: (o.roundUp / 100).toFixed(2), valueInBaseUnits: o.roundUp }, boostPortion: null } : null,
       cashback: null,
       amount: { currencyCode: 'AUD', value: (cents / 100).toFixed(2), valueInBaseUnits: cents },
       foreignAmount: o.foreign ? { currencyCode: o.foreign[0], value: (o.foreign[1] / 100).toFixed(2), valueInBaseUnits: o.foreign[1] } : null,
       cardPurchaseMethod: o.card ? { method: o.card[0], cardNumberSuffix: o.card[1] } : null,
+      holdInfo: o.held ? { amount: { currencyCode: 'AUD', value: (cents / 100).toFixed(2), valueInBaseUnits: cents }, foreignAmount: null } : null,
       settledAt: o.held ? null : createdAt, createdAt,
       transactionType: o.type ?? (cents < 0 ? 'Purchase' : 'Direct Credit'),
       note: o.note ? { text: o.note } : null,
@@ -128,7 +129,7 @@ export function fixture() {
       tx('j-house-int', 'j-house', 200, T('11-01', '03:00'), { desc: 'Interest', type: 'Interest', categorizable: false }),
       tx('j-house-out', 'j-house', -6000, T('11-10'), { categorizable: false, type: 'Transfer', to: 'j-bills', desc: 'Transfer to Bills' }),
       tx('j-bills-in', 'j-bills', 6000, T('11-10'), { categorizable: false, type: 'Transfer', to: 'j-house', desc: 'Transfer from House' }),
-      tx('j-origin', 'j-bills', -4000, T('11-12'), { desc: 'Origin Energy', cat: 'utilities' }),
+      tx('j-origin', 'j-bills', -4000, T('11-12'), { desc: 'Origin Energy', cat: 'utilities', by: 'Sam Jones' }),
     ],
   };
   const categories = CATS.map(([id, parent, name]) => ({

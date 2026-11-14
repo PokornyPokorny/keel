@@ -84,11 +84,11 @@ export function startPhotos({ root, getToken, onUnauthorized, behind = null }) {
   }
 
   // ---- home: paint from what the phone knows at once, then again once GitHub answers ----
-  async function renderHome() {
+  async function renderHome(phases = [false, true]) {
     const seq = ++renderSeq, token = getToken();
     if (!token) return;
     let loaded;
-    for (const network of [false, true]) {
+    for (const network of phases) {
       const now = new Date();
       let state;
       try {
@@ -160,15 +160,28 @@ export function startPhotos({ root, getToken, onUnauthorized, behind = null }) {
     return navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1920 } }, audio: false });
   }
   const stopTracks = stream => stream?.getTracks().forEach(t => t.stop());
-  const playing = () => new Promise(ok => {
-    if (video.readyState >= 2 && !video.paused) return ok();
-    video.addEventListener('playing', ok, { once: true });
+  // Wait for the first camera picture: 'playing', or 'stopped' if this stream was taken away, or 'timeout'.
+  // Never waits forever: a camera that never starts must not leave the daily prompt stuck after 6pm.
+  const CAMERA_START_MS = 6000;
+  const playing = stream => new Promise(ok => {
+    if (video.readyState >= 2 && !video.paused) return ok('playing');
+    const gone = () => { if (video.srcObject !== stream) done('stopped'); };
+    const done = r => {
+      clearTimeout(timer);
+      video.removeEventListener('playing', onPlay);
+      for (const e of ['emptied', 'abort', 'error']) video.removeEventListener(e, gone);
+      ok(r);
+    };
+    const onPlay = () => done('playing');
+    video.addEventListener('playing', onPlay);
+    for (const e of ['emptied', 'abort', 'error']) video.addEventListener(e, gone);
+    const timer = setTimeout(() => done(video.srcObject === stream ? 'timeout' : 'stopped'), CAMERA_START_MS);
     video.play().catch(() => {});
   });
   async function showStream(stream, facing) {
     video.srcObject = stream;
     video.classList.toggle('mirror', facing === 'user');
-    await playing();
+    return playing(stream);
   }
 
   async function openCamera() {
@@ -186,8 +199,14 @@ export function startPhotos({ root, getToken, onUnauthorized, behind = null }) {
       }
       cam = { stream, day, facing: 'environment' };
       openBtn.hidden = true;
-      await showStream(stream, 'environment');
+      const started = await showStream(stream, 'environment');
       if (cam?.stream !== stream) return 'left';   // left the app before the picture appeared: not counted
+      if (started !== 'playing') {                 // no picture ever came: nothing used, say so
+        closeCamera();
+        message.textContent = "The camera didn't start. Today isn't used.";
+        openBtn.hidden = false;
+        return 'failed';
+      }
       try { await local.markUsed(day); }           // the attempt counts from here, before the picture shows
       catch (e) {
         closeCamera();
@@ -402,21 +421,40 @@ export function startPhotos({ root, getToken, onUnauthorized, behind = null }) {
   });
   setInterval(() => { if (renderedDay && dayKey(new Date()) !== renderedDay && !cam) refresh(); }, 15000);
 
+  // Every open: decide the reveal or the prompt from what the phone already knows, before any network,
+  // then check again once GitHub has answered (another phone may have taken today's photo).
   async function refresh() {
+    dismissed = false; escaped = false;
     if (rv?.waiting) showRevealPhoto();
-    await renderHome();                          // paint first: a weak signal must not leave home blank
+    const known = await renderHome([false]);     // paint first: a weak signal must not leave home blank
+    if (known) await decide(known, 'saved');
+    await renderHome([true]);
     await flushQueue();
-    const loaded = await renderHome();
-    if (!loaded || rv || cam) return;
+    const loaded = await renderHome([true]);
+    if (loaded) await decide(loaded, 'fresh');
+  }
+  async function decide(loaded, source) {
+    if (cam) return;
     const pending = pendingReveals(loaded, m => local.revealPos(m) === 'done', new Date());
-    if (pending.length) { startReveal(pending.map(m => loaded.find(x => x.month === m))); return; }
+    const list = pending.map(m => loaded.find(x => x.month === m));
+    if (rv) {
+      // A reveal started from the phone's saved list restarts with GitHub's fuller list (oldest first),
+      // as long as nothing has been seen beyond its first photo yet.
+      if (source === 'fresh' && rv.fromSaved && rv.m === 0 && rv.i === 0 && list.length
+          && list.map(x => x.month).join() !== rv.months.map(x => x.month).join()) startReveal(list);
+      return;
+    }
+    if (list.length) { hidePrompt(); startReveal(list); rv.fromSaved = source === 'saved'; return; }
     await maybePrompt(loaded);
   }
 
   // ---- the daily prompt: every open until today is done; the × only before 6pm, so no day is missed ----
   const promptEl = $('#prompt'), promptClose = $('#prompt-close'), promptLate = $('.prompt-late'),
         promptMsg = $('#prompt-msg'), promptContinue = $('#prompt-continue');
+  let dismissed = false;                        // × used during this open (only offered before 6pm)
+  let escaped = false;                          // "Continue to Keel" after a camera failure: holds for this open
   function showPrompt(dismissable) {
+    if (!promptEl.hidden) { promptClose.hidden = !dismissable; promptLate.hidden = dismissable; return; } // keep any message on screen
     promptClose.hidden = !dismissable;
     promptLate.hidden = dismissable;
     promptMsg.textContent = '';
@@ -434,10 +472,13 @@ export function startPhotos({ root, getToken, onUnauthorized, behind = null }) {
     try { state = await local.dayState(today); } catch { /* storage trouble: don't trap anyone behind the prompt */ return hidePrompt(); }
     const taken = state || held.has(today) || (loaded.find(m => m.month === monthOf(today))?.days ?? []).includes(today);
     if (taken || cam) return hidePrompt();
-    showPrompt(now.getHours() < 18);
+    if (escaped) return;                        // never trap anyone behind a camera that won't work
+    const dismissable = now.getHours() < 18;
+    if (dismissed && dismissable) return;      // dismissed this open (and still before 6pm)
+    showPrompt(dismissable);
   }
-  promptClose.addEventListener('click', hidePrompt);
-  promptContinue.addEventListener('click', hidePrompt);
+  promptClose.addEventListener('click', () => { dismissed = true; hidePrompt(); });
+  promptContinue.addEventListener('click', () => { escaped = true; hidePrompt(); });
   $('#prompt-camera').addEventListener('click', async () => {
     promptMsg.textContent = '';
     const r = await openCamera();

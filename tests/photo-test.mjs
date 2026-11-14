@@ -321,6 +321,7 @@ async function camera() {
     await dayOpen(H, '2026-11-28T09:00');
     await openCamera(H); await shoot(H);
     assert.ok(await homeHas(H, "Today's done"));
+    await H.wait(1500);                                   // let the shot's own (offline) upload attempt finish first
     H.github.rejectNextPut = 422;
     H.setOffline(false);
     await H.eval(`window.dispatchEvent(new Event('online'))`); await H.wait(1500);
@@ -555,6 +556,28 @@ async function prompt() {
     await openPhotos(H);
     assert.ok(await homeHas(H, 'No photo today'), await text(H));
   });
+  await check('P10 the prompt appears before GitHub answers (slow network)', async () => {
+    await H.setClock('2026-11-26T19:00:00'); H.github.delayMs = 4000;
+    await H.reload(); await H.signIn();
+    const fast = await H.waitFor(`!document.getElementById('prompt').hidden`, 2000);
+    H.github.delayMs = 0;
+    assert.ok(fast, 'prompt within 2 s while GitHub takes 4 s');
+  });
+  await check("P9 after 6pm a camera that never starts can't trap you, even after leaving and coming back", async () => {
+    await H.setClock('2026-11-27T19:00:00'); await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000));
+    await H.eval(`navigator.mediaDevices.getUserMedia = async () => new MediaStream()`);   // granted, but no picture ever arrives
+    await H.eval(`document.getElementById('prompt-camera').click()`);
+    await H.wait(300);
+    await H.eval(`Object.defineProperty(document,'hidden',{configurable:true,get:()=>true}); document.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document,'hidden',{configurable:true,get:()=>false}); document.dispatchEvent(new Event('visibilitychange'));`);
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000), 'prompt back');
+    await H.eval(`document.getElementById('prompt-camera').click()`);
+    assert.ok(await H.waitFor(`!document.getElementById('prompt-continue').hidden && document.getElementById('prompt-msg').textContent.includes("The camera didn't start")`, 12000), 'way through offered');
+    await H.eval(`document.getElementById('prompt-continue').click()`);
+    assert.equal(await H.eval(`document.getElementById('money-root').inert`), false);
+    assert.equal(await inPage(H, `return l.isUsed('2026-11-27')`), false, 'day not used');
+  });
   await check('P8 on the 1st the reveal comes first, not the prompt', async () => {
     await H.setClock('2026-11-20T09:00'); await H.reload(); await H.signIn();
     for (const day of ['2026-11-02', '2026-11-09']) H.github.seed(`photos/2026/11/${day}.jpg`, await makeJpeg(H, day));
@@ -575,6 +598,17 @@ async function prompt() {
     assert.equal(await promptShown(H), false);
     assert.equal(await H.eval(`document.getElementById('money-root').inert`), false);
     assert.equal(await inPage(H, `return l.isUsed('2026-11-24')`), false);
+  });
+  await check('P6b after Continue, the prompt stays away for this open even when GitHub answers later', async () => {
+    H.github.delayMs = 800;
+    await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000));
+    await H.eval(`document.getElementById('prompt-camera').click()`);
+    assert.ok(await H.waitFor(`!document.getElementById('prompt-continue').hidden`, 6000));
+    await H.eval(`document.getElementById('prompt-continue').click()`);
+    await H.waitFor(`false`, 14000);                      // GitHub's slow answers arrive and the open is re-checked
+    H.github.delayMs = 0;
+    assert.equal(await promptShown(H), false, 'prompt came back');
   });
   H.close();
 }

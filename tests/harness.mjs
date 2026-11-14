@@ -80,6 +80,7 @@ class FakeUp {
   tokens = {};                 // { me, partner }: reassign one to revoke it
   offline = false;
   rateLimitNext = null;        // seconds: the next request gets a 429 with Retry-After
+  delayMs = 0;                 // every answer arrives this late (a slow network)
   calls = [];                  // 'METHOD path?query who'
   data = { me: null, partner: null, joint: { accounts: [], transactions: [] } };
   categories = []; tags = []; attachments = {};
@@ -93,8 +94,9 @@ class FakeUp {
   replace(key, id, t) { const l = this.#list(key); l[l.findIndex(x => x.id === id)] = t; }
   remove(key, id) { const l = this.#list(key); l.splice(l.findIndex(x => x.id === id), 1); }
 
-  handle(method, url, headers) {
+  async handle(method, url, headers) {
     if (method === 'OPTIONS') return { status: 204 };
+    if (this.delayMs) await wait(this.delayMs);
     if (this.offline) return 'offline';
     const u = new URL(url), path = u.pathname.slice(new URL(UP).pathname.length);
     const auth = (headers.Authorization || headers.authorization || '').replace(/^Bearer /, '');
@@ -199,7 +201,7 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
         return await reply('Fetch.fulfillRequest', { responseCode: r.status, responseHeaders: headers, body: b64(r.body ?? '') });
       }
       if (request.url.startsWith(UP)) {
-        const r = up.handle(request.method, request.url, request.headers);
+        const r = await up.handle(request.method, request.url, request.headers);
         if (r === 'offline') return await reply('Fetch.failRequest', { errorReason: 'InternetDisconnected' });
         const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Expose-Headers': 'Retry-After' };
         const headers = Object.entries({ ...cors, ...(r.headers || {}) }).map(([name, value]) => ({ name, value }));

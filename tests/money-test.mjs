@@ -161,6 +161,44 @@ async function screens() {
     assert.ok(t.includes('Today $1,800.00') && t.includes('Start $1,696.08'), t);
     await click(H, '#m-balance-close');
   });
+  await check('U15 the sheet also shows who made it, the type and a hold', async () => {
+    await click(H, '#money [data-tx="j-origin"]');
+    let t = await H.eval(`document.getElementById('m-sheet').innerText`);
+    assert.ok(t.includes('Made by') && t.includes('Sam Jones') && t.includes('Type') && t.includes('Purchase'), t);
+    await click(H, '#m-sheet-close');
+    await click(H, '#money [data-tx="a-uber-held"]');
+    t = await H.eval(`document.getElementById('m-sheet').innerText`);
+    assert.ok(t.includes('Hold') && t.includes('$18.40'), t);
+    await click(H, '#m-sheet-close');
+  });
+  await check('U14 small grey text is readable (contrast at least 4.5:1)', async () => {
+    const cols = await H.eval(`[getComputedStyle(document.querySelector('#money .fine')).color, getComputedStyle(document.querySelector('#money .heat span[title]:not([style])')).color]`);
+    assert.deepEqual(cols, ['rgb(142, 142, 147)', 'rgb(142, 142, 147)']);
+  });
+  await check('U12 a rejected token says so on Money and points to settings', async () => {
+    H.up.tokens.me = 'regenerated';
+    await H.reload(); await H.signIn();
+    assert.ok(await mHas(H, "Up rejected Alex's token"), await mText(H));
+    assert.ok(await H.eval(`!!document.querySelector('#money .month [data-act="settings"]')`), 'link to settings');
+    H.up.tokens.me = TOKENS.me;
+    await H.reload(); await H.signIn();
+    assert.ok(await mHas(H, 'Updated just now'));
+  });
+  await check('U13 Remove during a sync stays removed', async () => {
+    await click(H, '#money [data-act="settings"]');
+    H.up.delayMs = 700;
+    await click(H, '#m-refresh-all');
+    await H.wait(200);
+    await click(H, '#m-settings [data-act="remove"][data-w="partner"]');
+    await H.wait(7000);
+    H.up.delayMs = 0;
+    const r = await inPage(H, `const d = await s.load(); return { stored: !!d.pulls.partner, token: localStorage.getItem('keel-up-token-partner') }`);
+    assert.deepEqual(r, { stored: false, token: null });
+    await setVal(H, '#t-partner', TOKENS.partner); await click(H, '#t-partner-save');
+    assert.ok(await H.waitFor(`document.getElementById('t-partner-msg').textContent === 'Connected'`, 8000));
+    await click(H, '#m-settings-back');
+    assert.ok(await H.waitFor(`document.querySelector('#money .hero .big')?.innerText.replace(/\s/g, '') === '905.59'`, 15000), 'partner data back');
+  });
   await check('U8 offline later: everything from the phone, says how old it is', async () => {
     H.up.offline = true;
     await H.reload(); await H.signIn();
