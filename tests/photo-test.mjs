@@ -132,7 +132,8 @@ async function camera() {
     await shoot(H);
     assert.ok(await homeHas(H, "Today's done"), await text(H));
     assert.ok(await H.waitFor(`document.getElementById('app').innerText.includes('November · 1 day')`, 5000), await text(H));
-    assert.ok(await H.waitFor(`true`) && file('2026-11-14'), 'file uploaded');
+    for (let i = 0; i < 50 && !file('2026-11-14'); i++) await H.wait(100);   // home now counts the queued photo before it uploads
+    assert.ok(file('2026-11-14'), 'file uploaded');
     const info = jpegInfo(file('2026-11-14').bytes);
     assert.ok(info.width > 0 && Math.max(info.width, info.height) <= 1500, JSON.stringify(info));
     assert.equal(info.hasExif, false);
