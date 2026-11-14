@@ -6,6 +6,7 @@ import * as local from './local.js';
 
 const BLOCKED = "Camera blocked. Allow camera access for Keel, then try again. Today isn't used.";
 const NO_CAMERA = "No camera found. Today isn't used.";
+const STORAGE = "Keel couldn't read its storage on this phone. Close Keel and open it again.";
 const MAX_SIDE = 1500;
 const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const plural = n => `${n} ${n === 1 ? 'day' : 'days'}`;
@@ -43,42 +44,65 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   const gridEl = $('#grid'), gridTitle = $('.grid-title'), gridDays = $('.grid-days'), viewer = $('#viewer');
 
   let cam = null;               // { stream, day, facing } while the camera is open
-  let rv = null;                // reveal in progress: { months: [{month, days}], m, i, waiting }
+  let starting = false;         // opening the camera is in progress (ignores a second tap)
+  let rv = null;                // reveal in progress: { months: [{month, days}], m, i, loading, waiting }
   let renderedDay = null, renderSeq = 0, flushing = null, months = [];
+  const held = new Map();       // day -> Blob the phone's storage refused; uploaded straight from memory
 
-  // ---- what exists: GitHub's listing (or the last one saved on this phone) plus photos still queued ----
-  async function loadMonths(token, now) {
+  // ---- what exists: GitHub's listing (or the last one saved on this phone) plus photos not yet uploaded ----
+  async function loadMonths(token, now, network) {
     const unauthorized = e => { if (e.code === 'unauthorized') throw e; };
-    let names;
-    try { names = await gh.listMonths(token); local.saveMonths(names); }
-    catch (e) { unauthorized(e); names = local.savedMonths(); }
-    const queued = await local.queuedDays();
-    const all = [...new Set([...names, ...queued.map(monthOf), monthOf(dayKey(now))])].sort();
+    let names = local.savedMonths();
+    if (network) {
+      try { names = await gh.listMonths(token); local.saveMonths(names); }
+      catch (e) { unauthorized(e); }
+    }
+    const pending = [...await local.queuedDays(), ...held.keys()];
+    const all = [...new Set([...names, ...pending.map(monthOf), monthOf(dayKey(now))])].sort();
     return Promise.all(all.map(async month => {
-      let days;
-      try { days = await gh.listDays(token, month); local.saveDays(month, days); }
-      catch (e) { unauthorized(e); days = local.savedDays(month); }
-      return { month, days: [...new Set([...days, ...queued.filter(d => monthOf(d) === month)])].sort() };
+      let days = local.savedDays(month);
+      if (network) {
+        try { days = await gh.listDays(token, month); local.saveDays(month, days); }
+        catch (e) { unauthorized(e); }
+      }
+      return { month, days: [...new Set([...days, ...pending.filter(d => monthOf(d) === month)])].sort() };
     }));
   }
 
-  // ---- home ----
+  // ---- home: paint from what the phone knows at once, then again once GitHub answers ----
   async function renderHome() {
     const seq = ++renderSeq, token = getToken();
     if (!token) return;
-    const now = new Date(), today = dayKey(now), month = monthOf(today);
     let loaded;
-    try { loaded = await loadMonths(token, now); }
-    catch { return onUnauthorized(); }
-    const used = await local.isUsed(today);
-    if (seq !== renderSeq) return;
+    for (const network of [false, true]) {
+      const now = new Date();
+      let state;
+      try {
+        const next = await loadMonths(token, now, network);
+        state = [next, await local.dayState(dayKey(now))];
+      } catch (e) {
+        if (e.code === 'unauthorized') return onUnauthorized();
+        if (seq === renderSeq) message.textContent = STORAGE;
+        return;
+      }
+      if (seq !== renderSeq) return;
+      loaded = state[0];
+      paint(now, ...state);
+    }
+    return loaded;
+  }
+
+  function paint(now, loaded, todayState) {
+    const today = dayKey(now), month = monthOf(today);
     months = loaded;
     const current = months.find(m => m.month === month)?.days ?? [];
-    const taken = current.includes(today);
+    // 'taken' is recorded on the phone, so a GitHub listing that lags the upload can't make it look missed.
+    const taken = current.includes(today) || todayState === 'taken';
     renderedDay = today;
-    todayEl.textContent = taken ? "Today's done" : used ? 'No photo today' : '';
-    openBtn.hidden = taken || used || !!cam;
+    todayEl.textContent = taken ? "Today's done" : todayState ? 'No photo today' : '';
+    openBtn.hidden = taken || !!todayState || !!cam;
     monthLine.textContent = `${monthLabel(month, now)} · ${plural(current.length)}`;
+    if (message.textContent === STORAGE) message.textContent = '';
     const notice = local.takeNotice();
     if (notice) message.textContent = notice;
     monthsNav.replaceChildren(...months.filter(m => m.days.length && isUnlocked(m.month, now)).reverse().map(m => {
@@ -88,26 +112,30 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
       b.addEventListener('click', () => local.revealPos(m.month) === 'done' ? openGrid(m) : startReveal([m]));
       return b;
     }));
-    return months;
   }
 
-  // ---- upload queue ----
-  const flushQueue = () => flushing ??= doFlush().finally(() => { flushing = null; });
+  // ---- uploads: photos held in memory first, then the phone's queue ----
+  const flushQueue = () => flushing ??= doFlush().catch(() => {}).finally(() => { flushing = null; });
   async function doFlush() {
     const token = getToken();
     if (!token) return;
-    for (const day of await local.queuedDays()) {
-      const blob = await local.queuedBlob(day);
+    let queued = [];
+    try { queued = await local.queuedDays(); } catch {} // storage trouble: still try what's held in memory
+    for (const day of [...held.keys(), ...queued]) {
+      const fromMemory = held.has(day);
       try {
+        const blob = fromMemory ? held.get(day) : await local.queuedBlob(day);
         if (await gh.putPhoto(token, day, blob) === 'exists') {
           // Either our own earlier upload whose reply was lost, or another phone got there first.
           const [mine, theirs] = await Promise.all([gh.blobSha(blob), gh.remoteSha(token, day)]);
+          if (theirs === null) continue;            // refused, yet nothing there: keep it and try again later
           if (mine !== theirs) local.setNotice(`Another phone already saved ${shortDate(day)}. The photo from this phone was dropped.`);
         }
-        await local.dequeue(day);
+        if (fromMemory) held.delete(day); else await local.dequeue(day);
+        local.markTaken(day).catch(() => {});
       } catch (e) {
-        if (e.code === 'unauthorized') onUnauthorized();
-        return; // offline or GitHub trouble: the queue stays for next time
+        if (e.code === 'unauthorized') { onUnauthorized(); return; }
+        if (e.code === 'offline' || e.code === 'http') return; // the queue stays for next time
       }
     }
   }
@@ -130,20 +158,29 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   }
 
   async function openCamera() {
-    if (cam) return;
-    message.textContent = '';
-    const day = dayKey(new Date());
-    let stream;
-    try { stream = await getStream('environment'); }
-    catch (e) { message.textContent = e.name === 'NotAllowedError' || e.name === 'SecurityError' ? BLOCKED : NO_CAMERA; return; }
-    cam = { stream, day, facing: 'environment' };
-    openBtn.hidden = true;
-    await showStream(stream, 'environment');
-    if (cam?.stream !== stream) return;            // left the app before the picture appeared: not counted
-    await local.markUsed(day);                     // the attempt counts from here, before the picture shows
-    if (cam?.stream !== stream) return renderHome();
-    layer.hidden = false;
-    shutter.disabled = false;
+    if (cam || starting) return;                   // a second tap while the camera starts does nothing
+    starting = true;
+    try {
+      message.textContent = '';
+      const day = dayKey(new Date());
+      let stream;
+      try { stream = await getStream('environment'); }
+      catch (e) { message.textContent = e.name === 'NotAllowedError' || e.name === 'SecurityError' ? BLOCKED : NO_CAMERA; return; }
+      cam = { stream, day, facing: 'environment' };
+      openBtn.hidden = true;
+      await showStream(stream, 'environment');
+      if (cam?.stream !== stream) return;          // left the app before the picture appeared: not counted
+      try { await local.markUsed(day); }           // the attempt counts from here, before the picture shows
+      catch (e) {
+        closeCamera();
+        message.textContent = `Couldn't open the camera: ${e.message} Today isn't used.`;
+        openBtn.hidden = false;
+        return;
+      }
+      if (cam?.stream !== stream) return renderHome();
+      layer.hidden = false;
+      shutter.disabled = false;
+    } finally { starting = false; }
   }
 
   async function flip() {
@@ -183,20 +220,27 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
     await renderHome();
     await flushQueue();
     await renderHome();
+    if (held.has(day)) message.textContent = "Today's photo hasn't uploaded yet. Keep Keel open until it does.";
   }
 
-  // A captured shot is never thrown away for a technical fault: retry, then say what went wrong.
+  // A captured shot is never thrown away for a technical fault. If this phone's storage won't take it,
+  // it is held in memory and uploaded straight from there.
   async function save(day, canvas) {
-    let last;
+    let blob, last;
+    for (let attempt = 0; attempt < 3 && !blob; attempt++) {
+      try { blob = await new Promise((ok, bad) => canvas.toBlob(b => b ? ok(b) : bad(new Error('the photo could not be encoded')), 'image/jpeg', 0.85)); }
+      catch (e) { last = e; await new Promise(r => setTimeout(r, 1000)); }
+    }
+    if (!blob) { message.textContent = `Couldn't save today's photo: ${last?.message || last}`; return false; }
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const blob = await new Promise((ok, bad) => canvas.toBlob(b => b ? ok(b) : bad(new Error('the photo could not be encoded')), 'image/jpeg', 0.85));
         await local.enqueue(day, blob);
+        await local.markTaken(day).catch(() => {});
         return true;
       } catch (e) { last = e; await new Promise(r => setTimeout(r, 1000)); }
     }
-    message.textContent = `Couldn't save today's photo: ${last?.message || last}`;
-    return false;
+    held.set(day, blob);
+    return true;
   }
 
   // ---- photos of unlocked months: phone first, then GitHub ----
@@ -214,7 +258,7 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   // ---- reveal: once per month, oldest first, resumes where it stopped ----
   function startReveal(list) {
     const m = list[0], pos = local.revealPos(m.month);
-    rv = { months: list, m: 0, i: typeof pos === 'number' ? Math.min(pos, m.days.length - 1) : 0, waiting: false };
+    rv = { months: list, m: 0, i: typeof pos === 'number' ? Math.min(pos, m.days.length - 1) : 0, loading: false, waiting: false };
     gridEl.hidden = true;
     revealEl.hidden = false;
     showRevealPhoto();
@@ -224,17 +268,19 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
     const r = rv, { month, days } = r.months[r.m], i = r.i, day = days[i];
     revealLabel.textContent = `${shortDate(day)} · ${i + 1}/${days.length}`;
     local.setRevealPos(month, i);
+    // Until this photo is on screen, taps don't move on: a photo is never skipped in the once-only reveal.
+    r.loading = true; r.waiting = false;
+    revealWait.hidden = true;
+    revealEl.querySelector('img')?.remove();
     let blob;
     try { blob = await photoBlob(day); }
     catch (e) {
       if (e.code === 'unauthorized') { closeReveal(); return onUnauthorized(); }
-      if (rv === r && r.i === i) { r.waiting = true; revealWait.hidden = false; }
+      if (rv === r && r.i === i) { r.loading = false; r.waiting = true; revealWait.hidden = false; }
       return;
     }
     if (rv !== r || r.i !== i || r.months[r.m].month !== month) return; // moved on meanwhile
-    r.waiting = false;
-    revealWait.hidden = true;
-    revealEl.querySelector('img')?.remove();
+    r.loading = false;
     const img = document.createElement('img');
     img.alt = shortDate(day);
     img.src = objectUrl(blob);
@@ -243,7 +289,8 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   }
 
   function revealNext() {
-    if (!rv || rv.waiting) return;              // never move past a photo that hasn't been seen
+    if (!rv || rv.loading) return;              // never move past a photo that hasn't been seen
+    if (rv.waiting) return showRevealPhoto();   // "Waiting for signal": a tap tries again
     const { month, days } = rv.months[rv.m];
     if (rv.i < days.length - 1) { rv.i++; return showRevealPhoto(); }
     local.setRevealPos(month, 'done');
@@ -254,7 +301,7 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   }
   function revealBack() {
     if (!rv || rv.i === 0) return;
-    rv.i--; rv.waiting = false; revealWait.hidden = true;
+    rv.i--;
     showRevealPhoto();
   }
   function closeReveal() {
@@ -324,7 +371,10 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   shutter.addEventListener('click', shoot);
   flipBtn.addEventListener('click', flip);
   // Leaving the app with the camera open loses the day (it was marked used when the picture appeared).
-  document.addEventListener('visibilitychange', () => { if (document.hidden && cam) { closeCamera(); renderHome(); } });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (cam) { closeCamera(); renderHome(); } }
+    else if (!root.hidden) refresh();            // back in Keel: upload what's waiting, catch up
+  });
   window.addEventListener('online', async () => {
     await flushQueue();
     if (rv?.waiting) showRevealPhoto();
@@ -333,6 +383,8 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   setInterval(() => { if (renderedDay && dayKey(new Date()) !== renderedDay && !cam) refresh(); }, 15000);
 
   async function refresh() {
+    if (rv?.waiting) showRevealPhoto();
+    await renderHome();                          // paint first: a weak signal must not leave home blank
     await flushQueue();
     const loaded = await renderHome();
     if (!loaded || rv || cam) return;

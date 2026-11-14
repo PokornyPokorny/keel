@@ -53,6 +53,15 @@ async function storage() {
     H.setOffline(false);
     assert.deepEqual(r, { used: true, other: false, queued: ['2026-11-15'], size: jpeg.length, pos: 4 });
   });
+  await check('S7 queued photos are stored as plain bytes, not Blobs (WebKit Blob-in-IndexedDB bugs)', async () => {
+    await inPage(H, `await l.enqueue('2026-11-16', blob('${j64}'))`);
+    const r = await H.eval(`new Promise(ok => { const q = indexedDB.open('keel'); q.onsuccess = () => {
+      const g = q.result.transaction('queue').objectStore('queue').get('2026-11-16');
+      g.onsuccess = () => { const v = g.result; ok({ isBlob: v instanceof Blob, kind: Object.prototype.toString.call(v.bytes ?? v) }); q.result.close(); }; }; })`);
+    assert.deepEqual(r, { isBlob: false, kind: '[object ArrayBuffer]' });
+    const back = await inPage(H, `const b = await l.queuedBlob('2026-11-16'); return { isBlob: b instanceof Blob, size: b.size, type: b.type }`);
+    assert.deepEqual(back, { isBlob: true, size: jpeg.length, type: 'image/jpeg' });
+  });
   H.close();
 }
 
@@ -225,12 +234,117 @@ async function camera() {
     await H.advanceClock(15000);
     assert.ok(await homeHas(H, 'Open camera · one shot', 17000), await text(H));
   });
+  const spyCamera = () => H.eval(`window.__tracks = []; window.__gum = 0; const orig = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async c => { __gum++; const s = await orig(c); __tracks.push(...s.getTracks()); return s; }`);
+  const tokenKept = async () => {
+    assert.equal(await H.eval(`localStorage.getItem('keel-token')`), H.github.token, 'code kept');
+    assert.equal(await H.eval(`document.getElementById('token').hidden`), true, 'not sent to the code screen');
+  };
+  await check('C13 a dropped IndexedDB connection is reopened: the waiting photo still uploads, code kept', async () => {
+    H.setOffline(true);
+    await dayOpen(H, '2026-11-24T09:00');
+    await openCamera(H); await shoot(H);
+    assert.ok(await homeHas(H, "Today's done"));
+    await H.eval(`(() => { const orig = IDBDatabase.prototype.transaction; let once = true;
+      IDBDatabase.prototype.transaction = function (...a) { if (once) { once = false; throw new DOMException('The database connection is closing.', 'InvalidStateError'); } return orig.apply(this, a); }; })()`);
+    H.setOffline(false);
+    await H.eval(`window.dispatchEvent(new Event('online'))`);
+    for (let i = 0; i < 30 && !file('2026-11-24'); i++) await H.wait(100);
+    assert.ok(file('2026-11-24'), 'uploaded despite one dropped connection');
+    await tokenKept();
+  });
+  await check('C13b storage that keeps failing: plain message, code kept', async () => {
+    await H.eval(`IDBDatabase.prototype.transaction = function () { throw new DOMException('Connection to Indexed Database server lost.', 'UnknownError'); }`);
+    await H.eval(`window.dispatchEvent(new Event('online'))`);
+    assert.ok(await homeHas(H, "Keel couldn't read its storage on this phone. Close Keel and open it again."), await text(H));
+    await tokenKept();
+  });
+  await check('C14 weak signal: home shows straight away from what the phone knows', async () => {
+    await H.setClock('2026-11-25T09:00');
+    H.github.delayMs = 20000;
+    await H.reload();
+    const ok = await homeHas(H, 'Open camera · one shot', 3000) && await homeHas(H, 'November · ', 500);
+    H.github.delayMs = 0;
+    assert.ok(ok, await text(H));
+  });
+  await check('C20 GitHub listing lags after an upload: never "No photo today" for a taken photo', async () => {
+    await H.reload(); await H.signIn(); await H.wait(800);
+    H.github.listLagMs = 8000;
+    await openCamera(H); await shoot(H);
+    for (let i = 0; i < 30 && !file('2026-11-25'); i++) await H.wait(100);
+    assert.ok(file('2026-11-25'), 'uploaded');
+    let sawNoPhoto = false;
+    for (let i = 0; i < 20; i++) { if ((await text(H)).includes('No photo today')) sawNoPhoto = true; await H.wait(100); }
+    await H.reload(); await H.signIn(); await H.wait(800);
+    const afterReload = await text(H);
+    H.github.listLagMs = 0;
+    assert.equal(sawNoPhoto, false, 'flashed No photo today');
+    assert.ok(afterReload.includes("Today's done"), afterReload);
+  });
+  await check('C15 phone storage refuses the shot: it still goes to GitHub', async () => {
+    await dayOpen(H, '2026-11-26T09:00');
+    await H.eval(`(() => { const orig = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (...a) { if (this.name === 'queue') throw new DOMException('Quota exceeded', 'QuotaExceededError'); return orig.apply(this, a); }; })()`);
+    await openCamera(H); await shoot(H);
+    for (let i = 0; i < 80 && !file('2026-11-26'); i++) await H.wait(100);
+    assert.ok(file('2026-11-26'), 'uploaded straight from memory');
+    assert.ok(await homeHas(H, "Today's done"), await text(H));
+  });
+  await check('C16 phone storage refuses to record the attempt: camera off, plain message, today not used', async () => {
+    await dayOpen(H, '2026-11-27T09:00');
+    await spyCamera();
+    await H.eval(`(() => { const orig = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (...a) { if (this.name === 'used') throw new DOMException('Connection to Indexed Database server lost.', 'UnknownError'); return orig.apply(this, a); }; })()`);
+    await openCamera(H);
+    assert.ok(await homeHas(H, "Couldn't open the camera"), await text(H));
+    assert.equal(await H.eval(`__tracks.length > 0 && __tracks.every(t => t.readyState === 'ended')`), true, 'tracks stopped');
+    assert.equal(await H.eval(`document.getElementById('camera').hidden`), true);
+    assert.ok(await visible(H, '#open-camera'), 'can try again');
+  });
+  await check('C17 a 422 with no file on GitHub keeps the photo queued and tells nobody it was dropped', async () => {
+    H.setOffline(true);
+    await dayOpen(H, '2026-11-28T09:00');
+    await openCamera(H); await shoot(H);
+    assert.ok(await homeHas(H, "Today's done"));
+    H.github.rejectNextPut = 422;
+    H.setOffline(false);
+    await H.eval(`window.dispatchEvent(new Event('online'))`); await H.wait(1500);
+    assert.deepEqual(await queued(), ['2026-11-28']);
+    assert.equal((await text(H)).includes('Another phone'), false);
+    await H.eval(`window.dispatchEvent(new Event('online'))`);
+    for (let i = 0; i < 30 && !file('2026-11-28'); i++) await H.wait(100);
+    assert.ok(file('2026-11-28'), 'uploaded on the next try');
+  });
+  await check('C18 double-tapping Open camera starts one camera, and it turns off after the shot', async () => {
+    await dayOpen(H, '2026-11-29T09:00');
+    await spyCamera();
+    await H.eval(`(() => { const b = document.getElementById('open-camera'); b.click(); b.click(); })()`);
+    await shoot(H);
+    assert.ok(await homeHas(H, "Today's done"), await text(H));
+    assert.equal(await H.eval(`__gum`), 1, 'getUserMedia calls');
+    assert.equal(await H.eval(`__tracks.every(t => t.readyState === 'ended')`), true, 'all tracks stopped');
+  });
+  await check('C19 coming back to Keel (no Face ID) uploads a waiting photo', async () => {
+    H.setOffline(true);
+    await dayOpen(H, '2026-11-30T09:00');
+    await openCamera(H); await shoot(H);
+    assert.ok(await homeHas(H, "Today's done"));
+    H.setOffline(false);
+    await H.eval(`Object.defineProperty(document,'hidden',{configurable:true,get:()=>true}); document.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document,'hidden',{configurable:true,get:()=>false}); document.dispatchEvent(new Event('visibilitychange'));`);
+    for (let i = 0; i < 30 && !file('2026-11-30'); i++) await H.wait(100);
+    assert.ok(file('2026-11-30'), 'uploaded on return');
+  });
   H.close();
 }
 
 // ---- Reveal + grid (Task 5) ----
 const label = H => H.eval(`document.querySelector('#reveal .reveal-label')?.textContent ?? ''`);
-const tap = (H, sel = '#reveal') => H.eval(`(() => { const e = document.querySelector(${JSON.stringify(sel)});
+// A person taps once the photo is on screen (or "Waiting for signal" shows); tapNow doesn't wait.
+const settled = `(() => { const lab = document.querySelector('#reveal .reveal-label')?.textContent ?? '', img = document.querySelector('#reveal img');
+  return document.querySelector('#reveal .reveal-wait')?.hidden === false || (!!img && img.alt === lab.split(' · ')[0] && img.complete && img.naturalWidth > 0); })()`;
+const tap = async (H, sel = '#reveal') => { await H.waitFor(settled, 8000); return tapNow(H, sel); };
+const tapNow = (H, sel = '#reveal') => H.eval(`(() => { const e = document.querySelector(${JSON.stringify(sel)});
   e.dispatchEvent(new PointerEvent('pointerdown', { clientX: 200, clientY: 300, bubbles: true }));
   e.dispatchEvent(new PointerEvent('pointerup', { clientX: 200, clientY: 300, bubbles: true })); })()`);
 const swipeBack = H => H.eval(`(() => { const e = document.querySelector('#reveal');
@@ -306,27 +420,75 @@ async function revealAndGrid() {
 async function revealOffline() {
   const H = await launch({ local });
   await H.setClock('2026-10-20T09:00'); await H.open(); await H.signIn();
-  for (const day of ['2026-10-02', '2026-10-09']) H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
+  for (const day of ['2026-10-02', '2026-10-09', '2026-10-16', '2026-10-23']) H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
   await H.reload(); await H.signIn();
-  assert.ok(await homeHas(H, 'October · 2 days'));
+  assert.ok(await homeHas(H, 'October · 4 days'));
   await check('R7 offline on the 1st with nothing downloaded: waits, does not skip, resumes online', async () => {
     H.setOffline(true);
     await H.setClock('2026-11-01T08:00'); await H.reload(); await H.wait(800);
-    assert.ok(await labelIs(H, '2 Oct · 1/2'), await label(H));
+    assert.ok(await labelIs(H, '2 Oct · 1/4'), await label(H));
     assert.ok(await H.waitFor(`document.querySelector('#reveal .reveal-wait')?.textContent === 'Waiting for signal'`), 'waiting shown');
     await tap(H); await H.wait(300);
-    assert.equal(await label(H), '2 Oct · 1/2');
+    assert.equal(await label(H), '2 Oct · 1/4');
     assert.equal(await inPage(H, `return l.revealPos('2026-10')`), 0);
     H.setOffline(false);
     await H.eval(`window.dispatchEvent(new Event('online'))`);
     assert.ok(await H.waitFor(`(() => { const i = document.querySelector('#reveal img'); return !!i && i.complete && i.naturalWidth > 0; })()`, 3000), 'photo shows');
+  });
+  await check('R10 "Waiting for signal" is never a dead end: tapping retries', async () => {
+    await H.wait(1500);                                   // let the next two photos preload
+    H.setOffline(true);
+    await tap(H); assert.ok(await labelIs(H, '9 Oct · 2/4'), await label(H));
+    await tap(H); assert.ok(await labelIs(H, '16 Oct · 3/4'), await label(H));
+    await H.waitFor(`(() => { const i = document.querySelector('#reveal img'); return !!i && i.complete && i.naturalWidth > 0; })()`, 3000);
+    await tap(H); assert.ok(await labelIs(H, '23 Oct · 4/4'), await label(H));
+    assert.ok(await H.waitFor(`document.querySelector('#reveal .reveal-wait')?.hidden === false`), 'waiting shown');
+    H.setOffline(false);                                  // signal back, but iOS fires no 'online' event
+    await tap(H);
+    assert.ok(await H.waitFor(`(() => { const i = document.querySelector('#reveal img'); return !!i && i.alt === '23 Oct' && i.complete && i.naturalWidth > 0; })()`, 3000), 'photo shows after a tap');
+    assert.equal(await label(H), '23 Oct · 4/4');
+  });
+  H.close();
+}
+
+async function revealSlow() {
+  const H = await launch({ local });
+  await H.setClock('2026-10-20T09:00'); await H.open(); await H.signIn();
+  for (const day of ['2026-10-02', '2026-10-09', '2026-10-16']) H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
+  await H.reload(); await H.signIn();
+  assert.ok(await homeHas(H, 'October · 3 days'));
+  await check('R9 slow download: taps wait for the photo instead of skipping it', async () => {
+    H.github.delayRawMs = 2500;
+    await H.setClock('2026-11-01T08:00'); await H.reload(); await H.signIn();
+    assert.ok(await labelIs(H, '2 Oct · 1/3'), await label(H));
+    await tapNow(H); await tapNow(H); await H.wait(300);
+    assert.equal(await label(H), '2 Oct · 1/3');
+    assert.equal(await inPage(H, `return l.revealPos('2026-10')`), 0);
+    assert.ok(await H.waitFor(`(() => { const i = document.querySelector('#reveal img'); return !!i && i.alt === '2 Oct' && i.naturalWidth > 0; })()`, 6000), 'first photo shows');
+    H.github.delayRawMs = 0;
+    await tap(H); assert.ok(await labelIs(H, '9 Oct · 2/3', 6000), await label(H));
+  });
+  H.close();
+}
+
+async function offlineShell() {
+  const H = await launch({ local });
+  await H.setClock('2026-10-20T09:00'); await H.open(); await H.signIn(); await H.wait(800);
+  await check('O1 Keel opens with no signal at all (cold start, nothing from the network)', async () => {
+    assert.ok(await H.waitFor(`!!navigator.serviceWorker?.controller`, 8000), 'service worker controls the page');
+    await H.wait(1000);                                   // let the shell finish caching
+    H.setSiteOffline(true); H.setOffline(true);
+    await H.reload();
+    assert.ok(await H.waitFor(`!document.getElementById('app')?.hidden`, 5000), 'app shown');
+    assert.ok(await homeHas(H, 'Open camera · one shot'), await text(H));
+    H.setSiteOffline(false); H.setOffline(false);
   });
   H.close();
 }
 
 // ONLY=camera,reveal runs just those sections (for debugging); the gates always run everything.
 const only = process.env.ONLY?.split(',');
-const sections = { storage, cameraErrors, camera, revealAndGrid, revealOffline };
+const sections = { storage, cameraErrors, camera, revealAndGrid, revealOffline, revealSlow, offlineShell };
 for (const [name, fn] of Object.entries(sections)) if (!only || only.includes(name)) await fn();
 console.log(`photo-test: ${passed}/${total} passed`);
 process.exit(passed === total ? 0 : 1);

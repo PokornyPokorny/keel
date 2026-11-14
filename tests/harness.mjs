@@ -1,7 +1,8 @@
 // Headless Edge over CDP for Keel's browser tests: virtual Face ID, fake camera, a controllable clock,
 // and an in-memory fake of the GitHub Contents API for PokornyPokorny/keel-data.
 import { spawn } from 'node:child_process';
-import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { readFileSync, existsSync, statSync, mkdtempSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
@@ -21,12 +22,20 @@ class FakeGitHub {
   calls = [];          // 'METHOD url Authorization'
   token = 'github_pat_good';
   failNextPut = null;  // status to answer on the next PUT, after storing the file anyway (a lost response)
+  rejectNextPut = null; // status to answer on the next PUT without storing anything
+  delayMs = 0;         // every API answer arrives this late (a weak signal)
+  delayRawMs = 0;      // only photo downloads arrive this late
+  listLagMs = 0;       // files saved by PUT stay out of directory listings this long (GitHub read-after-write lag)
   offline = false;
+  #savedAt = new Map();
   seed(path, bytes) { this.files.set(path, { bytes, sha: gitSha(bytes) }); }
 
   // -> { status, headers?, body?: Buffer|string } or 'offline'
-  handle(method, url, headers, body) {
+  async handle(method, url, headers, body) {
     if (method === 'OPTIONS') return { status: 204 };
+    const accept0 = headers.Accept || headers.accept || '';
+    const delay = this.delayMs + (accept0.includes('raw') ? this.delayRawMs : 0);
+    if (delay) await wait(delay);
     if (this.offline) return 'offline';
     const auth = headers.Authorization || headers.authorization || '';
     this.calls.push(`${method} ${url} ${auth}`);
@@ -39,9 +48,11 @@ class FakeGitHub {
 
     if (method === 'PUT') {
       const req = JSON.parse(body || '{}');
+      if (this.rejectNextPut) { const st = this.rejectNextPut; this.rejectNextPut = null; return json(st, { message: 'Validation Failed' }); }
       const existing = this.files.get(path);
       if (existing && req.sha !== existing.sha) return json(422, { message: existing && !req.sha ? 'Invalid request.\n\n"sha" wasn\'t supplied.' : 'sha does not match' });
       this.seed(path, Buffer.from(req.content, 'base64'));
+      this.#savedAt.set(path, Date.now());
       this.commits.push({ path, message: req.message });
       if (this.failNextPut) { const s = this.failNextPut; this.failNextPut = null; return json(s, { message: 'Server Error' }); }
       return json(existing ? 200 : 201, { content: { path, sha: this.files.get(path).sha } });
@@ -54,7 +65,7 @@ class FakeGitHub {
       return json(200, { type: 'file', name: path.split('/').pop(), path, sha: file.sha, size: file.bytes.length, encoding: 'base64', content: b64(file.bytes) });
     }
     const prefix = path + '/', kids = new Map();
-    for (const [p, f] of this.files) if (p.startsWith(prefix)) {
+    for (const [p, f] of this.files) if (p.startsWith(prefix) && !(Date.now() - (this.#savedAt.get(p) ?? 0) < this.listLagMs)) {
       const name = p.slice(prefix.length).split('/')[0], isFile = !p.slice(prefix.length).includes('/');
       kids.set(name, { name, path: prefix + name, sha: isFile ? f.sha : '', type: isFile ? 'file' : 'dir' });
     }
@@ -64,6 +75,22 @@ class FakeGitHub {
 const json = (status, obj) => ({ status, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
 
 export async function launch({ local = false, camera = 'granted' } = {}) {
+  // Local mode serves the working tree from http://localhost (a secure context, so passkeys and service workers
+  // work); the service worker's own fetches can't be intercepted over CDP, so a real server is the honest path.
+  let siteOffline = false, server = null, site = SITE;
+  if (local) {
+    server = createServer((req, res) => {
+      if (process.env.HARNESS_DEBUG) console.error('[srv]', req.url, siteOffline ? 'OFFLINE' : '');
+      if (siteOffline) return req.socket.destroy();
+      const path = new URL(req.url, 'http://localhost').pathname;
+      const rel = path.startsWith('/keel/') ? decodeURIComponent(path.slice(6)) || 'index.html' : null;
+      if (!rel || rel.includes('..') || !existsSync(rel) || statSync(rel).isDirectory()) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'Content-Type': TYPES[extname(rel)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+      res.end(readFileSync(rel));
+    });
+    await new Promise(ok => server.listen(0, '127.0.0.1', ok));
+    site = `http://localhost:${server.address().port}/keel/`;
+  }
   const profile = mkdtempSync(join(tmpdir(), 'keel-edge-'));
   const args = ['--headless=new', '--remote-debugging-port=0', '--user-data-dir=' + profile, '--no-first-run'];
   if (camera === 'granted') args.push('--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream');
@@ -76,50 +103,56 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
     const f = join(profile, 'DevToolsActivePort');
     try { port = readFileSync(f, 'utf8').split('\n')[0].trim() || undefined; } catch {} // missing, or Edge is still writing it
   }
-  let tabs;
-  for (let i = 0; i < 50 && !tabs?.length; i++) { tabs = await fetch(`http://127.0.0.1:${port}/json`).then(r => r.json()).catch(() => null); if (!tabs?.length) await wait(100); }
-  const ws = new WebSocket(tabs.find(t => t.type === 'page').webSocketDebuggerUrl);
+  // One browser-level connection with flattened sessions: the page, plus any service worker it registers,
+  // so the worker's own fetches (precache, offline serving) also go through the fakes below.
+  let version;
+  for (let i = 0; i < 50 && !version; i++) { version = await fetch(`http://127.0.0.1:${port}/json/version`).then(r => r.json()).catch(() => null); if (!version) await wait(100); }
+  const ws = new WebSocket(version.webSocketDebuggerUrl);
   await new Promise((ok, bad) => { ws.onopen = ok; ws.onerror = bad; });
 
   const github = new FakeGitHub();
-  let id = 0; const pending = {};
-  const send = (method, params = {}) => new Promise((ok, bad) => {
+  let id = 0, page = null; const pending = {};
+  const raw = (method, params = {}, sessionId) => new Promise((ok, bad) => {
     pending[++id] = m => m.error ? bad(new Error(`${method}: ${m.error.message}`)) : ok(m.result);
-    ws.send(JSON.stringify({ id, method, params }));
+    ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
+  const send = (method, params = {}) => raw(method, params, page); // tests talk to the page
+  const intercept = { patterns: [{ urlPattern: API + '*' }, ...(local ? [] : [{ urlPattern: SITE + '*' }])] };
 
   ws.onmessage = async e => {
     const m = JSON.parse(e.data);
     if (m.id && pending[m.id]) { pending[m.id](m); delete pending[m.id]; return; }
+    if (process.env.HARNESS_DEBUG && (m.method === 'Target.attachedToTarget' || m.method === 'Fetch.requestPaused')) console.error('[cdp]', m.method, m.params.targetInfo?.type ?? '', m.params.request?.url ?? '', m.sessionId ?? 'browser', m.params.waitingForDebugger ?? '');
+    if (m.method === 'Target.attachedToTarget') {
+      const { sessionId, targetInfo, waitingForDebugger } = m.params;
+      if (waitingForDebugger) raw('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
+      return;
+    }
     if (m.method !== 'Fetch.requestPaused') return;
-    const { requestId, request, networkId } = m.params;
+    const s = m.sessionId, { requestId, request, networkId } = m.params;
+    const reply = (method, params) => raw(method, { requestId, ...params }, s);
     try {
       if (request.url.startsWith(API)) {
         let body = request.postData;
         if (body === undefined && request.postDataEntries) body = Buffer.concat(request.postDataEntries.map(x => Buffer.from(x.bytes || '', 'base64'))).toString();
-        if (body === undefined && request.hasPostData) body = (await send('Network.getRequestPostData', { requestId: networkId })).postData;
-        const r = github.handle(request.method, request.url, request.headers, body);
-        if (r === 'offline') return await send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' });
+        if (body === undefined && request.hasPostData) body = (await raw('Network.getRequestPostData', { requestId: networkId }, s)).postData;
+        const r = await github.handle(request.method, request.url, request.headers, body);
+        if (r === 'offline') return await reply('Fetch.failRequest', { errorReason: 'InternetDisconnected' });
         const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, accept, content-type', 'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS' };
         const headers = Object.entries({ ...cors, ...(r.headers || {}) }).map(([name, value]) => ({ name, value }));
-        return await send('Fetch.fulfillRequest', { requestId, responseCode: r.status, responseHeaders: headers, body: b64(r.body ?? '') });
+        return await reply('Fetch.fulfillRequest', { responseCode: r.status, responseHeaders: headers, body: b64(r.body ?? '') });
       }
-      if (local && request.url.startsWith(SITE)) {
-        const rel = new URL(request.url).pathname.slice(new URL(SITE).pathname.length) || 'index.html';
-        if (!rel.includes('..') && existsSync(rel)) {
-          return await send('Fetch.fulfillRequest', { requestId, responseCode: 200, body: b64(readFileSync(rel)),
-            responseHeaders: [{ name: 'Content-Type', value: TYPES[extname(rel)] || 'application/octet-stream' }, { name: 'Cache-Control', value: 'no-store' }] });
-        }
-        return await send('Fetch.fulfillRequest', { requestId, responseCode: 404, responseHeaders: [], body: '' });
-      }
-      return await send('Fetch.continueRequest', { requestId });
-    } catch (err) { if (!/Invalid InterceptionId/.test(err.message)) console.error('harness:', err.message); } // the page moved on
+      if (request.url.startsWith(SITE) && siteOffline) return await reply('Fetch.failRequest', { errorReason: 'InternetDisconnected' });
+      return await reply('Fetch.continueRequest', {});
+    } catch (err) { if (process.env.HARNESS_DEBUG || !/Invalid InterceptionId|No session|Session with given id/.test(err.message)) console.error('harness:', request.url, err.message); } // the page moved on
   };
 
+  const targets = (await raw('Target.getTargets')).targetInfos;
+  page = (await raw('Target.attachToTarget', { targetId: targets.find(t => t.type === 'page').targetId, flatten: true })).sessionId;
   await send('Network.enable');
-  await send('Network.setCacheDisabled', { cacheDisabled: true });
+  // no Network.setCacheDisabled: it stalls service-worker fetches in Edge; the local server sends no-store instead
   await send('Page.enable');
-  await send('Fetch.enable', { patterns: [{ urlPattern: API + '*' }, { urlPattern: SITE + '*' }] });
+  await send('Fetch.enable', intercept);
   // Headless Edge always has a built-in fake camera, so "no camera" is simulated on the test side.
   if (camera === 'none') await send('Page.addScriptToEvaluateOnNewDocument', { source:
     `navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Requested device not found', 'NotFoundError'));` });
@@ -138,7 +171,7 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
       return false;
     },
     async open(path = '') {
-      await send('Page.navigate', { url: SITE + path });
+      await send('Page.navigate', { url: site + path });
       await H.waitFor(`document.readyState === 'complete'`, 10000);
       await wait(300);
     },
@@ -157,6 +190,7 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
     },
     advanceClock: ms => H.eval(`__keelAdvanceClock(${ms})`),
     setOffline(on) { github.offline = on; },
+    setSiteOffline(on) { siteOffline = on; }, // the page's own files fail too (a cold start with no signal)
     async addFaceId() {
       await send('WebAuthn.enable');
       return (await send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal',
@@ -172,7 +206,7 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
       }
       return H.waitFor(`!document.getElementById('app').hidden`);
     },
-    close() { try { ws.close(); edge.kill(); } catch {} setTimeout(() => { try { rmSync(profile, { recursive: true, force: true }); } catch {} }, 1000); },
+    close() { try { ws.close(); edge.kill(); server?.close(); server?.closeAllConnections?.(); } catch {} setTimeout(() => { try { rmSync(profile, { recursive: true, force: true }); } catch {} }, 1000); },
   };
   return H;
 }

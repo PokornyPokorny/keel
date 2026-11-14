@@ -12,6 +12,7 @@ async function call(token, path, { method = 'GET', body, raw = false } = {}) {
   try {
     r = await fetch(API + path, {
       method, cache: 'no-store', body: body && JSON.stringify(body),
+      signal: AbortSignal.timeout?.(method === 'PUT' ? 30000 : 10000), // weak signal: give up and count as offline
       headers: { Authorization: 'Bearer ' + token, Accept: raw ? 'application/vnd.github.raw' : 'application/vnd.github+json',
                  ...(body ? { 'Content-Type': 'application/json' } : {}) },
     });

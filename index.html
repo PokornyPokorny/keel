@@ -116,6 +116,7 @@
 
 <script type="module">
   import { startPhotos } from './photos.js';
+  navigator.serviceWorker?.register('sw.js').catch(() => {}); // lets Keel open with no signal
   // Same model as Yarvo Box Stock: this page is public, the data lives in a private repo,
   // and the "GitHub code" is a fine-grained token that can only reach that repo.
   const DATA_REPO = 'PokornyPokorny/keel-data';

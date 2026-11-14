@@ -5,29 +5,48 @@ let opening;
 const db = () => opening ??= new Promise((ok, bad) => {
   const r = indexedDB.open('keel', 1);
   r.onupgradeneeded = () => { for (const s of ['used', 'queue', 'photos']) r.result.createObjectStore(s); };
-  r.onsuccess = () => ok(r.result);
+  r.onsuccess = () => {
+    const d = r.result;
+    d.onclose = () => { opening = null; };                       // WebKit drops the connection after a resume
+    d.onversionchange = () => { d.close(); opening = null; };
+    ok(d);
+  };
   r.onerror = () => bad(r.error);
-});
+}).catch(e => { opening = null; throw e; });
 
-async function run(store, mode, fn) {
-  const t = (await db()).transaction(store, mode);
-  const done = new Promise((ok, bad) => { t.oncomplete = ok; t.onerror = t.onabort = () => bad(t.error); });
-  const r = fn(t.objectStore(store));
-  const result = await new Promise((ok, bad) => { r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error); });
-  await done;
-  return result;
+// A dropped connection ("connection lost", "is closing") is reopened and the work retried once.
+async function run(store, mode, fn, retry = true) {
+  try {
+    const t = (await db()).transaction(store, mode);
+    const done = new Promise((ok, bad) => { t.oncomplete = ok; t.onerror = t.onabort = () => bad(t.error); });
+    const r = fn(t.objectStore(store));
+    const result = await new Promise((ok, bad) => { r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error); });
+    await done;
+    return result;
+  } catch (e) {
+    if (!retry) throw e;
+    opening = null;
+    return run(store, mode, fn, false);
+  }
 }
 
-export const markUsed = day => run('used', 'readwrite', s => s.put(1, day));
-export const isUsed = async day => !!(await run('used', 'readonly', s => s.get(day)));
+// Photos are kept as plain bytes: WebKit has had bugs where Blobs stored in IndexedDB become unreadable.
+const pack = async blob => ({ type: blob.type, bytes: await blob.arrayBuffer() });
+const unpack = v => v instanceof Blob || !v ? v : new Blob([v.bytes], { type: v.type });
 
-export const enqueue = (day, blob) => run('queue', 'readwrite', s => s.put(blob, day));
+// A day is 'used' once the camera picture appears, and 'taken' once its photo is safe on this phone.
+export const markUsed = day => run('used', 'readwrite', s => s.put(1, day));
+export const markTaken = day => run('used', 'readwrite', s => s.put('taken', day));
+export const isUsed = async day => !!(await run('used', 'readonly', s => s.get(day)));
+export const dayState = async day => { const v = await run('used', 'readonly', s => s.get(day)); return v === 'taken' ? 'taken' : v ? 'used' : null; };
+
+export const enqueue = async (day, blob) => { const v = await pack(blob); return run('queue', 'readwrite', s => s.put(v, day)); };
 export const queuedDays = async () => (await run('queue', 'readonly', s => s.getAllKeys())).sort();
-export const queuedBlob = day => run('queue', 'readonly', s => s.get(day));
+export const queuedBlob = async day => unpack(await run('queue', 'readonly', s => s.get(day)));
 export const dequeue = day => run('queue', 'readwrite', s => s.delete(day));
 
-export const cachePut = (day, blob) => run('photos', 'readwrite', s => s.put(blob, day));
-export const cacheGet = day => run('photos', 'readonly', s => s.get(day));
+export const cachePut = async (day, blob) => { const v = await pack(blob); return run('photos', 'readwrite', s => s.put(v, day)); };
+export const cacheGet = async day => unpack(await run('photos', 'readonly', s => s.get(day)));
 
 const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const put = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
