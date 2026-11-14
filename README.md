@@ -29,6 +29,21 @@ Never commit the token. GitHub emails you before it expires.
 
 Keel locks whenever you leave it and asks for Face ID when you come back.
 
+## Photo a day
+
+- **One attempt a day.** Opening the camera uses today, so shoot or lose
+  the day. Leaving Keel with the camera open loses it too. There is no
+  preview and no retake.
+- **Hidden until the month is over.** On the 1st, last month plays once, one
+  photo at a time, oldest first. If you're interrupted, it picks up where you
+  stopped. After that the month is a calendar grid.
+- **Where photos live:** `photos/YYYY/MM/YYYY-MM-DD.jpg` in `keel-data`, one
+  commit per photo, at most 1500px and with no location data.
+  - GitHub refuses a second file for the same day.
+  - A shot taken offline waits on the phone and uploads later.
+- **You can peek on github.com** if you want to. The app just won't show the
+  photos early.
+
 ## Lost phone or leaked code
 
 Delete the token at https://github.com/settings/personal-access-tokens and
@@ -36,6 +51,12 @@ make a new one. The old phone can no longer reach `keel-data`.
 
 ## Test
 
-`node tests/app-test.mjs local` runs `index.html` in headless Edge with a
-virtual Face ID authenticator and a fake GitHub API. Without `local` it
-tests the live site.
+All tests run in headless Edge, with a virtual Face ID authenticator, a fake
+camera, a fake GitHub API and a controllable clock (`tests/harness.mjs`).
+Add `local` to test the working tree; leave it off to test the live site.
+
+- `node tests/days-test.mjs`: date logic, run in Node.
+- `node tests/app-test.mjs local`: the GitHub code and Face ID gate.
+- `node tests/photo-test.mjs local`: storage, camera rules, reveal and grid.
+  `ONLY=camera` (or `storage`, `cameraErrors`, `revealAndGrid`,
+  `revealOffline`) runs one section.
