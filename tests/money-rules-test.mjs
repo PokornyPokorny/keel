@@ -120,7 +120,53 @@ const cases = {
     assert.deepEqual(s.rows.map(r => r.id), ['s-house']);
     assert.equal(s.total, 360000);
   },
+
+  // ---- Task 4 ---- (hand-worked from the fixture; NOW = 14 Nov 2026 12:00)
+  'summary: everyone, November so far vs October to the same moment': () => {
+    const s = R.summary(both().txns, 'all', '2026-11', NOW_D);
+    assert.deepEqual([s.out, s.in, s.net, s.prevOutToSameMoment, s.prevMonth], [90559, 223512, 132953, 77699, '2026-10']);
+    assert.equal(s.outByDay.length, 30);
+    assert.equal(s.outByDay[6], 51000);                 // 7 Nov: rent + plumber
+    assert.equal(s.prevOutByDay.length, 31);
+  },
+  'summary: one person excludes the others, and internal money': () => {
+    const s = R.summary(both().txns, 'me', '2026-11', NOW_D);
+    assert.equal(s.out, 77459);
+  },
+  'summary: day 1 empty': () => {
+    const s = R.summary(both().txns, 'all', '2026-11', new Date(2026, 10, 1, 0, 5));
+    assert.deepEqual([s.out, s.in, s.net, s.prevOutToSameMoment], [0, 0, 0, 0]);
+    assert.ok(s.outByDay.every(Number.isFinite));
+  },
+  'summary: +11:00 at 23:30 on the last day counts in that month': () => {
+    const oct = R.summary(both().txns, 'me', '2026-10', NOW_D);
+    assert.ok(oct.outByDay[30] >= 2000, 'Late Pizza on 31 Oct');
+    assert.equal(R.summary(both().txns, 'me', '2026-11', NOW_D).outByDay[0], 0, 'not on 1 Nov');
+  },
+  'categories: parents and subs, sorted, totalling the spend': () => {
+    const c = R.categories(both().txns, 'all', '2026-11', f.categories, NOW_D);
+    assert.deepEqual(c.map(x => [x.name, x.total]), [['Home', 73920], ['Transport', 6340], ['Good Life', 5299], ['Personal', 5000]]);
+    assert.deepEqual(c[0].subs.map(x => [x.name, x.total]), [['Rent & Mortgage', 48000], ['Groceries', 18920], ['Utilities', 7000]]);
+    assert.equal(c.reduce((a, x) => a + x.total, 0), 90559);
+  },
+  'daily: highest day and average so far': () => {
+    const d = R.daily(both().txns, 'all', '2026-11', NOW_D);
+    assert.deepEqual(d.highest, { day: '2026-11-07', cents: 51000 });
+    assert.equal(d.average, Math.round(90559 / 14));
+  },
+  'merchants: by count, then total': () => {
+    const m = R.merchants(both().txns, 'all', '2026-11', NOW_D);
+    assert.deepEqual(m[0], { name: 'Goodlife Health', count: 2, total: 5000 });
+  },
+  'repeats: weekly, fortnightly, monthly with next dates; ignores irregular and twice-seen': () => {
+    const r = R.repeats(both().txns, 'all', NOW_D);
+    assert.deepEqual(r.map(x => [x.name, x.every, x.amount, dayKey(x.next)]),
+      [['Goodlife Health', 'weekly', 2500, '2026-11-17'], ['Rent Co', 'fortnightly', 48000, '2026-11-21'], ['Netflix', 'monthly', 1699, '2026-12-02']]);
+    assert.equal(r[1].perMonth, Math.round(48000 * 26 / 12));
+  },
 };
+const NOW_D = new Date(2026, 10, 14, 12, 0);
+const { dayKey } = await import('../days.js');
 
 let passed = 0;
 for (const [name, fn] of Object.entries(cases)) {

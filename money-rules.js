@@ -128,4 +128,116 @@ export function savers(accounts, txns, view, monthStart, at) {
   return { total, byOwner, rows, savedThisMonth: rows.reduce((s, r) => s + r.monthDelta, 0), roundupsThisMonth };
 }
 
+// ---- month views. `view` is 'all' | 'me' | 'partner' | 'joint'; a month is 'YYYY-MM' in local time. ----
+const inView = view => t => view === 'all' || t.owner === view;
+const monthStartOf = month => { const [y, m] = month.split('-').map(Number); return new Date(y, m - 1, 1); };
+const addMonths = (d, n) => new Date(d.getFullYear(), d.getMonth() + n, 1);
+const daysIn = d => new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+const monthKey = d => dayKey(d).slice(0, 7);
+
+// The window a month covers: up to `now` in the current month, the whole month otherwise.
+function window(month, now) {
+  const start = monthStartOf(month), next = addMonths(start, 1);
+  const current = monthKey(now) === month;
+  return { start, end: current ? now : next, current };
+}
+const spendIn = (txns, view, from, to) => txns.filter(t => inView(view)(t) && classify(t) === 'spend' && when(t) >= from && when(t) <= to);
+
+function byDay(list, start) {
+  const out = new Array(daysIn(start)).fill(0);
+  for (const t of list) out[when(t).getDate() - 1] += -cents(t);
+  return out;
+}
+
+export function summary(txns, view, month, now) {
+  const { start, end, current } = window(month, now);
+  const prevStart = addMonths(start, -1);
+  // last month up to the same day of the month and time (capped to its length), or all of it for a past month
+  const prevEnd = current
+    ? new Date(prevStart.getFullYear(), prevStart.getMonth(), Math.min(now.getDate(), daysIn(prevStart)), now.getHours(), now.getMinutes(), now.getSeconds())
+    : new Date(start.getTime() - 1);
+  const mine = txns.filter(t => inView(view)(t) && when(t) >= start && when(t) <= end);
+  const spend = mine.filter(t => classify(t) === 'spend'), income = mine.filter(t => classify(t) === 'income');
+  const out = spend.reduce((s, t) => s - cents(t), 0), inn = income.reduce((s, t) => s + cents(t), 0);
+  const prevSpend = spendIn(txns, view, prevStart, prevEnd);
+  return {
+    out, in: inn, net: inn - out,
+    outByDay: byDay(spend, start),
+    prevOutToSameMoment: prevSpend.reduce((s, t) => s - cents(t), 0),
+    prevOutByDay: byDay(spendIn(txns, view, prevStart, new Date(start.getTime() - 1)), prevStart),
+    prevMonth: monthKey(prevStart),
+  };
+}
+
+export function categories(txns, view, month, categoryList, now) {
+  const { start, end } = window(month, now);
+  const name = Object.fromEntries(categoryList.map(c => [c.id, c.attributes.name]));
+  const parents = new Map();
+  for (const t of spendIn(txns, view, start, end)) {
+    const sub = t.relationships.category?.data?.id ?? null, par = t.relationships.parentCategory?.data?.id ?? sub;
+    const p = parents.get(par) ?? { id: par, name: par ? (name[par] ?? par) : 'Uncategorised', total: 0, subs: new Map() };
+    p.total += -cents(t);
+    if (sub && sub !== par) {
+      const s = p.subs.get(sub) ?? { id: sub, name: name[sub] ?? sub, total: 0 };
+      s.total += -cents(t); p.subs.set(sub, s);
+    }
+    parents.set(par, p);
+  }
+  return [...parents.values()].map(p => ({ ...p, subs: [...p.subs.values()].sort((a, b) => b.total - a.total) }))
+    .sort((a, b) => b.total - a.total);
+}
+
+export function daily(txns, view, month, now) {
+  const { start, end, current } = window(month, now);
+  const days = byDay(spendIn(txns, view, start, end), start);
+  const byDayMap = Object.fromEntries(days.map((c, i) => [`${month}-${String(i + 1).padStart(2, '0')}`, c]));
+  const hi = days.reduce((best, c, i) => c > best.cents ? { day: `${month}-${String(i + 1).padStart(2, '0')}`, cents: c } : best, { day: null, cents: 0 });
+  const elapsed = current ? now.getDate() : days.length;
+  return { byDay: byDayMap, highest: hi, average: Math.round(days.reduce((a, b) => a + b, 0) / elapsed) };
+}
+
+export function merchants(txns, view, month, now) {
+  const { start, end } = window(month, now);
+  const m = new Map();
+  for (const t of spendIn(txns, view, start, end)) {
+    const k = t.attributes.description, e = m.get(k) ?? { name: k, count: 0, total: 0 };
+    e.count++; e.total += -cents(t); m.set(k, e);
+  }
+  return [...m.values()].sort((a, b) => b.count - a.count || b.total - a.total);
+}
+
+// Charges that come back on a schedule: at least 3 from one merchant, every gap weekly (7±2 days),
+// fortnightly (14±3) or monthly (28–33), every amount within 15% of the median, and still going.
+const BANDS = [
+  { every: 'weekly', lo: 5, hi: 9, days: 7, perMonth: 52 / 12 },
+  { every: 'fortnightly', lo: 11, hi: 17, days: 14, perMonth: 26 / 12 },
+  { every: 'monthly', lo: 28, hi: 33, days: 31, perMonth: 1 },
+];
+export function repeats(txns, view, now) {
+  const groups = new Map();
+  for (const t of txns) {
+    if (!inView(view)(t) || classify(t) !== 'spend' || when(t) > now) continue;
+    const k = t.attributes.description;
+    groups.set(k, [...(groups.get(k) ?? []), t]);
+  }
+  const out = [];
+  for (const [name, list] of groups) {
+    if (list.length < 3) continue;
+    list.sort((a, b) => when(a) - when(b));
+    const gaps = list.slice(1).map((t, i) => dayGap(list[i], t));
+    const band = BANDS.find(b => gaps.every(g => g >= b.lo && g <= b.hi));
+    if (!band) continue;
+    const amounts = list.map(t => -cents(t)).sort((a, b) => a - b);
+    const median = amounts.length % 2 ? amounts[(amounts.length - 1) / 2] : (amounts[amounts.length / 2 - 1] + amounts[amounts.length / 2]) / 2;
+    if (amounts.some(a => Math.abs(a - median) > median * 0.15)) continue;
+    const last = when(list.at(-1));
+    if ((localMidnight(now) - localMidnight(last)) / 864e5 > band.hi + (band.hi - band.lo) / 2) continue;
+    const next = band.every === 'monthly'
+      ? new Date(last.getFullYear(), last.getMonth() + 1, Math.min(last.getDate(), daysIn(new Date(last.getFullYear(), last.getMonth() + 1, 1))))
+      : new Date(last.getFullYear(), last.getMonth(), last.getDate() + band.days);
+    out.push({ name, every: band.every, amount: Math.round(median), next, perMonth: Math.round(median * band.perMonth) });
+  }
+  return out.sort((a, b) => a.next - b.next);
+}
+
 export { dayKey };
