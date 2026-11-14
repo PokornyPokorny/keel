@@ -88,7 +88,7 @@ async function sync() {
     assert.equal(r.updatedAt, before); assert.equal(r.stored, before);
     assert.ok(r.n > 0);
   });
-  H.close();
+  await H.close();
 }
 
 // ---- Screens (Task 7b) ----
@@ -232,7 +232,7 @@ async function screens() {
     assert.ok(rows <= 150 && await H.eval(`!!document.querySelector('#money [data-act="earlier"]')`), `rows ${rows}`);
     assert.ok(ms < 4000, `painted by ${Math.round(ms)} ms after navigation`);
   });
-  H.close();
+  await H.close();
 }
 
 // ONLY=sync,screens runs just those sections (for debugging); the gates always run everything.

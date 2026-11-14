@@ -41,4 +41,4 @@ const REPO = 'https://api.github.com/repos/PokornyPokorny/keel-data';
 const calls = H.github.calls, url = c => c.split(' ')[1];
 const codeChecks = calls.filter(c => c.startsWith('GET ') && url(c) === REPO);
 console.log('api calls:', codeChecks.length, calls.every(c => url(c) === REPO || url(c).startsWith(REPO + '/contents/')) ? 'all to keel-data' : calls);
-H.close(); process.exit(0);
+await H.close(); process.exit(0);

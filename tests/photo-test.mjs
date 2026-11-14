@@ -78,7 +78,7 @@ async function storage() {
     const back = await inPage(H, `const b = await l.queuedBlob('2026-11-16'); return { isBlob: b instanceof Blob, size: b.size, type: b.type }`);
     assert.deepEqual(back, { isBlob: true, size: jpeg.length, type: 'image/jpeg' });
   });
-  H.close();
+  await H.close();
 }
 
 // ---- Home + camera (Task 4) ----
@@ -101,7 +101,7 @@ async function cameraErrors() {
     assert.equal(await inPage(H, `return l.isUsed('2026-11-14')`), false);
     assert.ok(await visible(H, '#open-camera'), 'open button still offered');
   });
-  H.close();
+  await H.close();
   H = await launch({ local, camera: 'none' });
   await H.setClock('2026-11-14T09:00'); await H.open(); await enter(H);
   await check('C2b no camera: plain message, today not used', async () => {
@@ -109,7 +109,7 @@ async function cameraErrors() {
     assert.ok(await homeHas(H, "No camera found. Today isn't used."), await text(H));
     assert.equal(await inPage(H, `return l.isUsed('2026-11-14')`), false);
   });
-  H.close();
+  await H.close();
 }
 
 async function camera() {
@@ -354,7 +354,7 @@ async function camera() {
     for (let i = 0; i < 30 && !file('2026-11-30'); i++) await H.wait(100);
     assert.ok(file('2026-11-30'), 'uploaded on return');
   });
-  H.close();
+  await H.close();
 }
 
 // ---- Reveal + grid (Task 5) ----
@@ -433,7 +433,7 @@ async function revealAndGrid() {
       return imgs.length === 27 && imgs.every(i => i.complete && i.naturalWidth > 0); })()`, 8000), 'all 27 thumbnails from the phone');
     H.setOffline(false);
   });
-  H.close();
+  await H.close();
 }
 
 async function revealOffline() {
@@ -467,7 +467,7 @@ async function revealOffline() {
     assert.ok(await H.waitFor(`(() => { const i = document.querySelector('#reveal img'); return !!i && i.alt === '23 Oct' && i.complete && i.naturalWidth > 0; })()`, 3000), 'photo shows after a tap');
     assert.equal(await label(H), '23 Oct · 4/4');
   });
-  H.close();
+  await H.close();
 }
 
 async function revealSlow() {
@@ -487,7 +487,7 @@ async function revealSlow() {
     H.github.delayRawMs = 0;
     await tap(H); assert.ok(await labelIs(H, '9 Oct · 2/3', 6000), await label(H));
   });
-  H.close();
+  await H.close();
 }
 
 async function offlineShell() {
@@ -503,7 +503,7 @@ async function offlineShell() {
     assert.ok(await homeHas(H, 'Open camera · one shot'), await text(H));
     H.setSiteOffline(false); H.setOffline(false);
   });
-  H.close();
+  await H.close();
 }
 
 // ---- The daily prompt (Task 8) ----
@@ -598,7 +598,7 @@ async function prompt() {
     await H.wait(800);
     assert.equal(await promptShown(H), false, 'no prompt during the reveal');
   });
-  H.close();
+  await H.close();
 
   H = await launch({ local, camera: 'denied' });
   await H.setClock('2026-11-24T19:00'); await H.open(); await H.signIn();
@@ -622,7 +622,7 @@ async function prompt() {
     H.github.delayMs = 0;
     assert.equal(await promptShown(H), false, 'prompt came back');
   });
-  H.close();
+  await H.close();
 }
 
 // ONLY=camera,reveal runs just those sections (for debugging); the gates always run everything.

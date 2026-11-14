@@ -132,6 +132,10 @@ class FakeUp {
   }
 }
 
+// Every throwaway Edge profile this process made, so none outlive it (they're ~30 MB each and once filled the disk).
+const profiles = new Set();
+process.on('exit', () => { for (const p of profiles) { try { rmSync(p, { recursive: true, force: true }); } catch {} } });
+
 export async function launch({ local = false, camera = 'granted' } = {}) {
   // Local mode serves the working tree from http://localhost (a secure context, so passkeys and service workers
   // work); the service worker's own fetches can't be intercepted over CDP, so a real server is the honest path.
@@ -150,13 +154,14 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
     site = `http://localhost:${server.address().port}/keel/`;
   }
   const profile = mkdtempSync(join(tmpdir(), 'keel-edge-'));
+  profiles.add(profile);
   const args = ['--headless=new', '--remote-debugging-port=0', '--user-data-dir=' + profile, '--no-first-run'];
   if (camera === 'granted') args.push('--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream');
   if (camera === 'denied') args.push('--use-fake-device-for-media-stream'); // real prompt, which headless dismisses -> NotAllowedError
   const edge = spawn(EDGE, [...args, 'about:blank']);
 
   let port;
-  for (let i = 0; i < 100 && !port; i++) {
+  for (let i = 0; i < 200 && !port; i++) {
     await wait(100);
     const f = join(profile, 'DevToolsActivePort');
     try { port = readFileSync(f, 'utf8').split('\n')[0].trim() || undefined; } catch {} // missing, or Edge is still writing it
@@ -164,7 +169,9 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
   // One browser-level connection with flattened sessions: the page, plus any service worker it registers,
   // so the worker's own fetches (precache, offline serving) also go through the fakes below.
   let version;
-  for (let i = 0; i < 50 && !version; i++) { version = await fetch(`http://127.0.0.1:${port}/json/version`).then(r => r.json()).catch(() => null); if (!version) await wait(100); }
+  // Edge can be slow to open its debugging port on a busy machine: allow up to 20 s, then say so plainly.
+  for (let i = 0; i < 200 && !version; i++) { version = port && await fetch(`http://127.0.0.1:${port}/json/version`).then(r => r.json()).catch(() => null); if (!version) await wait(100); }
+  if (!version) throw new Error('harness: Edge did not open its debugging port within 20 s');
   const ws = new WebSocket(version.webSocketDebuggerUrl);
   await new Promise((ok, bad) => { ws.onopen = ok; ws.onerror = bad; });
 
@@ -271,7 +278,16 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
       }
       return H.waitFor(`!document.getElementById('app').hidden`);
     },
-    close() { try { ws.close(); edge.kill(); server?.close(); server?.closeAllConnections?.(); } catch {} setTimeout(() => { try { rmSync(profile, { recursive: true, force: true }); } catch {} }, 1000); },
+    // Quit Edge, wait for it to let go of its profile, then delete the profile. Await this before exiting.
+    async close() {
+      try { ws.close(); server?.close(); server?.closeAllConnections?.(); } catch {}
+      const gone = new Promise(ok => { if (edge.exitCode !== null) ok(); else { edge.once('exit', ok); setTimeout(ok, 5000); } });
+      try { edge.kill(); } catch {}
+      await gone;
+      for (let i = 0; i < 10; i++) {
+        try { rmSync(profile, { recursive: true, force: true }); profiles.delete(profile); break; } catch { await wait(300); }
+      }
+    },
   };
   return H;
 }

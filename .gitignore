@@ -5,3 +5,4 @@ explore/
 docs/superpowers/specs/*money*
 docs/superpowers/plans/*money*
 local/
+.superpowers/
