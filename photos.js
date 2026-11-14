@@ -11,7 +11,7 @@ const MAX_SIDE = 1500;
 const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const plural = n => `${n} ${n === 1 ? 'day' : 'days'}`;
 
-export function startPhotos({ root, getToken, onUnauthorized }) {
+export function startPhotos({ root, getToken, onUnauthorized, behind = null }) {
   root.innerHTML = `
     <div id="photos-home" class="layer scroll" hidden>
       <div class="ph-top"><button type="button" class="plain" id="photos-back">‹ Money</button></div>
@@ -22,6 +22,17 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
         <p id="month-line"></p>
         <nav id="months" aria-label="Past months"></nav>
       </section>
+    </div>
+    <div id="prompt" class="layer" hidden role="dialog" aria-modal="true" aria-labelledby="prompt-h">
+      <button type="button" id="prompt-close" class="plain" aria-label="Not now">×</button>
+      <div class="prompt-body">
+        <h2 id="prompt-h">Today's photo</h2>
+        <p>One shot. Opening the camera uses today.</p>
+        <p class="prompt-late" hidden>It's after 6pm: take today's photo to continue.</p>
+        <button type="button" id="prompt-camera">Open camera · one shot</button>
+        <p id="prompt-msg" role="status"></p>
+        <button type="button" id="prompt-continue" class="plain" hidden>Continue to Keel</button>
+      </div>
     </div>
     <div id="camera" class="layer" hidden>
       <video playsinline muted autoplay></video>
@@ -161,28 +172,34 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   }
 
   async function openCamera() {
-    if (cam || starting) return;                   // a second tap while the camera starts does nothing
+    if (cam || starting) return 'busy';            // a second tap while the camera starts does nothing
     starting = true;
     try {
       message.textContent = '';
       const day = dayKey(new Date());
       let stream;
       try { stream = await getStream('environment'); }
-      catch (e) { message.textContent = e.name === 'NotAllowedError' || e.name === 'SecurityError' ? BLOCKED : NO_CAMERA; return; }
+      catch (e) {
+        const blocked = e.name === 'NotAllowedError' || e.name === 'SecurityError';
+        message.textContent = blocked ? BLOCKED : NO_CAMERA;
+        return blocked ? 'blocked' : 'none';
+      }
       cam = { stream, day, facing: 'environment' };
       openBtn.hidden = true;
       await showStream(stream, 'environment');
-      if (cam?.stream !== stream) return;          // left the app before the picture appeared: not counted
+      if (cam?.stream !== stream) return 'left';   // left the app before the picture appeared: not counted
       try { await local.markUsed(day); }           // the attempt counts from here, before the picture shows
       catch (e) {
         closeCamera();
         message.textContent = `Couldn't open the camera: ${e.message} Today isn't used.`;
         openBtn.hidden = false;
-        return;
+        return 'failed';
       }
-      if (cam?.stream !== stream) return renderHome();
+      if (cam?.stream !== stream) { renderHome(); return 'left'; }
       layer.hidden = false;
       shutter.disabled = false;
+      hidePrompt();                                // the camera is up: the prompt has done its job
+      return 'open';
     } finally { starting = false; }
   }
 
@@ -392,8 +409,43 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
     const loaded = await renderHome();
     if (!loaded || rv || cam) return;
     const pending = pendingReveals(loaded, m => local.revealPos(m) === 'done', new Date());
-    if (pending.length) startReveal(pending.map(m => loaded.find(x => x.month === m)));
+    if (pending.length) { startReveal(pending.map(m => loaded.find(x => x.month === m))); return; }
+    await maybePrompt(loaded);
   }
+
+  // ---- the daily prompt: every open until today is done; the × only before 6pm, so no day is missed ----
+  const promptEl = $('#prompt'), promptClose = $('#prompt-close'), promptLate = $('.prompt-late'),
+        promptMsg = $('#prompt-msg'), promptContinue = $('#prompt-continue');
+  function showPrompt(dismissable) {
+    promptClose.hidden = !dismissable;
+    promptLate.hidden = dismissable;
+    promptMsg.textContent = '';
+    promptContinue.hidden = true;
+    promptEl.hidden = false;
+    if (behind) behind.inert = true;
+  }
+  function hidePrompt() {
+    promptEl.hidden = true;
+    if (behind) behind.inert = false;
+  }
+  async function maybePrompt(loaded) {
+    const now = new Date(), today = dayKey(now);
+    let state = null;
+    try { state = await local.dayState(today); } catch { /* storage trouble: don't trap anyone behind the prompt */ return hidePrompt(); }
+    const taken = state || held.has(today) || (loaded.find(m => m.month === monthOf(today))?.days ?? []).includes(today);
+    if (taken || cam) return hidePrompt();
+    showPrompt(now.getHours() < 18);
+  }
+  promptClose.addEventListener('click', hidePrompt);
+  promptContinue.addEventListener('click', hidePrompt);
+  $('#prompt-camera').addEventListener('click', async () => {
+    promptMsg.textContent = '';
+    const r = await openCamera();
+    if (r === 'blocked' || r === 'none' || r === 'failed') {
+      promptMsg.textContent = message.textContent;   // say why, and let them through: the day isn't used
+      promptContinue.hidden = false;
+    }
+  });
   const photosHome = $('#photos-home');
   $('#photos-back').addEventListener('click', () => { photosHome.hidden = true; });
   return {

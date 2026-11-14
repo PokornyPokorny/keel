@@ -28,6 +28,8 @@ async function enter(H) {
   await H.waitFor(`!!document.getElementById('photos-link')`);
   await H.eval(`document.getElementById('photos-link').click()`);
   await H.waitFor(`!document.getElementById('photos-home').hidden`);
+  await H.wait(300);
+  await H.eval(`(() => { const c = document.getElementById('prompt-close'); if (c && !c.hidden && !c.closest('[hidden]')) c.click(); })()`);
 }
 
 async function storage() {
@@ -500,9 +502,86 @@ async function offlineShell() {
   H.close();
 }
 
+// ---- The daily prompt (Task 8) ----
+const promptShown = H => H.eval(`(() => { const p = document.getElementById('prompt'); return !!p && !p.hidden; })()`);
+const closeShown = H => H.eval(`(() => { const c = document.getElementById('prompt-close'); return !!c && !c.hidden && !c.closest('[hidden]'); })()`);
+async function prompt() {
+  let H = await launch({ local });
+  await H.setClock('2026-11-24T09:00'); await H.open(); await H.signIn();
+  await check('P1 before 6pm: the prompt covers Money, with an ×', async () => {
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000), 'prompt shown');
+    assert.equal(await closeShown(H), true);
+  });
+  await check('P2 × dismisses for this open only; the next open shows it again', async () => {
+    await H.eval(`document.getElementById('prompt-close').click()`);
+    assert.equal(await promptShown(H), false);
+    assert.equal(await H.eval(`document.getElementById('money-root').inert`), false, 'Money usable');
+    await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000), 'back on the next open');
+  });
+  await check('P3 5:59pm has an ×; coming back after 6pm, it is gone', async () => {
+    await H.setClock('2026-11-24T17:59:30'); await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000));
+    assert.equal(await closeShown(H), true, '× at 5:59pm');
+    await H.eval(`document.getElementById('prompt-close').click()`);
+    await H.advanceClock(60000);
+    await H.eval(`Object.defineProperty(document,'hidden',{configurable:true,get:()=>true}); document.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document,'hidden',{configurable:true,get:()=>false}); document.dispatchEvent(new Event('visibilitychange'));`);
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden && document.getElementById('prompt-close').hidden`, 6000), 'no × after 6pm');
+  });
+  await check('P4 after 6pm: no ×, and Money underneath cannot be used', async () => {
+    await H.setClock('2026-11-24T18:00:00'); await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000));
+    assert.equal(await closeShown(H), false);
+    assert.equal(await H.eval(`document.getElementById('money-root').inert`), true);
+    assert.ok(await H.eval(`document.getElementById('prompt').innerText.includes("It's after 6pm: take today's photo to continue.")`));
+  });
+  await check('P5 taking the photo from the prompt closes it for the rest of the day', async () => {
+    await H.eval(`document.getElementById('prompt-camera').click()`);
+    await shoot(H);
+    assert.ok(await H.waitFor(`document.getElementById('prompt').hidden && !document.getElementById('money-root').inert`, 6000), 'prompt closed');
+    await H.reload(); await H.signIn(); await H.wait(1500);
+    assert.equal(await promptShown(H), false, 'no prompt after reload');
+  });
+  await check('P7 after 6pm, opening the camera and leaving uses the day: no prompt on return', async () => {
+    await H.setClock('2026-11-25T19:00:00'); await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000));
+    await H.eval(`document.getElementById('prompt-camera').click()`);
+    assert.ok(await H.waitFor(`!document.getElementById('camera').hidden`, 8000), 'camera open');
+    await H.eval(`Object.defineProperty(document,'hidden',{configurable:true,get:()=>true}); document.dispatchEvent(new Event('visibilitychange'));
+      Object.defineProperty(document,'hidden',{configurable:true,get:()=>false}); document.dispatchEvent(new Event('visibilitychange'));`);
+    await H.wait(1200);
+    assert.equal(await promptShown(H), false);
+    await openPhotos(H);
+    assert.ok(await homeHas(H, 'No photo today'), await text(H));
+  });
+  await check('P8 on the 1st the reveal comes first, not the prompt', async () => {
+    await H.setClock('2026-11-20T09:00'); await H.reload(); await H.signIn();
+    for (const day of ['2026-11-02', '2026-11-09']) H.github.seed(`photos/2026/11/${day}.jpg`, await makeJpeg(H, day));
+    await H.setClock('2026-12-01T09:00'); await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`!document.getElementById('reveal').hidden`, 8000), 'reveal shown');
+    await H.wait(800);
+    assert.equal(await promptShown(H), false, 'no prompt during the reveal');
+  });
+  H.close();
+
+  H = await launch({ local, camera: 'denied' });
+  await H.setClock('2026-11-24T19:00'); await H.open(); await H.signIn();
+  await check('P6 camera blocked after 6pm: says why and lets you through; the day is not used', async () => {
+    assert.ok(await H.waitFor(`!document.getElementById('prompt').hidden`, 6000));
+    await H.eval(`document.getElementById('prompt-camera').click()`);
+    assert.ok(await H.waitFor(`document.getElementById('prompt-msg').textContent.includes('Camera blocked') && !document.getElementById('prompt-continue').hidden`, 6000), 'message + continue');
+    await H.eval(`document.getElementById('prompt-continue').click()`);
+    assert.equal(await promptShown(H), false);
+    assert.equal(await H.eval(`document.getElementById('money-root').inert`), false);
+    assert.equal(await inPage(H, `return l.isUsed('2026-11-24')`), false);
+  });
+  H.close();
+}
+
 // ONLY=camera,reveal runs just those sections (for debugging); the gates always run everything.
 const only = process.env.ONLY?.split(',');
-const sections = { storage, cameraErrors, camera, revealAndGrid, revealOffline, revealSlow, offlineShell };
+const sections = { storage, cameraErrors, camera, revealAndGrid, revealOffline, revealSlow, offlineShell, prompt };
 for (const [name, fn] of Object.entries(sections)) if (!only || only.includes(name)) await fn();
 console.log(`photo-test: ${passed}/${total} passed`);
 process.exit(passed === total ? 0 : 1);
