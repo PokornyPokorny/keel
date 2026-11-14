@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Keel</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Keel">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+  html, body { margin: 0; height: 100%; background:#000; color: #fff; }
+  #lock { position: fixed; inset: 0; display: grid; place-items: center; }
+  #lock input {
+    width: 12ch; padding: 10px 0; border: 0; border-bottom: 1px solid #333;
+    background: transparent; color: #fff; font: 16px/1 ui-monospace, monospace;
+    text-align: center; letter-spacing: .1em; outline: none;
+  }
+  #lock input:focus { border-color: #888; }
+</style>
+</head>
+<body>
+<!-- shortcut: this is a curtain, not a lock. The repo is public, so anyone can read this file; real privacy comes from data living only in this device's storage. -->
+<form id="lock" hidden>
+  <input type="password" aria-label="Passcode" autocomplete="off" autocapitalize="off" spellcheck="false">
+</form>
+<main id="app" hidden></main>
+<script>
+  const HASH = 'e3c63e5834a33a112b5df311549b28864741d26b64c4bd90b7a8c0536125c7a2';
+  const KEY = 'keel-unlocked';
+  const lock = document.getElementById('lock');
+  const app = document.getElementById('app');
+  const input = lock.querySelector('input');
+
+  const sha256 = async s => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))]
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  const isUnlocked = () => { try { return localStorage.getItem(KEY) === HASH; } catch { return false; } };
+  const open = () => { lock.hidden = true; app.hidden = false; };
+
+  if (isUnlocked()) open(); else { lock.hidden = false; input.focus(); }
+
+  lock.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (await sha256(input.value.trim().toLowerCase()) === HASH) {
+      try { localStorage.setItem(KEY, HASH); } catch {}
+      open();
+    } else {
+      input.value = '';
+    }
+  });
+</script>
+</body>
+</html>
