@@ -44,6 +44,37 @@ Keel locks whenever you leave it and asks for Face ID when you come back.
 - **You can peek on github.com** if you want to. The app just won't show the
   photos early.
 
+## Money (Keel's home)
+
+Keel opens on Money: Up Bank data for you and, optionally, a partner, read
+straight from Up on the phone.
+
+- **Set up:** Money settings (the gear icon). Enter both people's names, then
+  paste each Up personal access token (from api.up.com.au/getting_started).
+  Keel checks a token with Up before keeping it.
+- **What stays where:** tokens, names and the downloaded bank data stay on the
+  phone only (local storage and IndexedDB `keel-money`, behind Face ID). None
+  of it is ever sent to GitHub, and Keel never writes to Up.
+- **Updating:** each open fetches the 14 days before the newest stored
+  transaction. Everything is re-pulled every 7 days, or on demand with
+  "Refresh everything".
+- **The money rules** (owners, transfers between your own accounts and between
+  the two of you, the 2Up split, round-ups, month-end balances) mirror the
+  owner's desktop dashboard. A local-only script checks them against it.
+
+## The daily photo prompt
+
+Until today's photo is taken, or today's single attempt is used, opening Keel
+shows "Today's photo" over Money.
+
+- **Before 6pm** an × dismisses it for that open only.
+- **From 6pm** there is no ×: take the photo to get in.
+- If the camera is blocked or missing, the prompt says why and lets you
+  through, and the day isn't used.
+
+Photo a day's own screens (this month, past months, the reveals) sit behind
+**Photos** on Money's top bar.
+
 ## Lost phone or leaked code
 
 Delete the token at https://github.com/settings/personal-access-tokens and
@@ -57,6 +88,11 @@ Add `local` to test the working tree; leave it off to test the live site.
 
 - `node tests/days-test.mjs`: date logic, run in Node.
 - `node tests/app-test.mjs local`: the GitHub code and Face ID gate.
-- `node tests/photo-test.mjs local`: storage, camera rules, reveal and grid.
+- `node tests/money-rules-test.mjs`: the money rules, run in Node against
+  made-up people.
+- `node tests/money-test.mjs local`: Up sync and the Money screens, against
+  a fake Up.
+- `node tests/photo-test.mjs local`: storage, camera rules, reveal, grid
+  and the daily prompt.
   `ONLY=camera` (or `storage`, `cameraErrors`, `revealAndGrid`,
   `revealOffline`) runs one section.
