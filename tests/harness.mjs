@@ -74,7 +74,7 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
   for (let i = 0; i < 100 && !port; i++) {
     await wait(100);
     const f = join(profile, 'DevToolsActivePort');
-    if (existsSync(f)) port = readFileSync(f, 'utf8').split('\n')[0].trim();
+    try { port = readFileSync(f, 'utf8').split('\n')[0].trim() || undefined; } catch {} // missing, or Edge is still writing it
   }
   let tabs;
   for (let i = 0; i < 50 && !tabs?.length; i++) { tabs = await fetch(`http://127.0.0.1:${port}/json`).then(r => r.json()).catch(() => null); if (!tabs?.length) await wait(100); }
