@@ -15,6 +15,7 @@
 <link rel="apple-touch-icon" href="icon-180.png?v=2">
 <style>
   html, body { margin: 0; height: 100%; background:#000; color: #fff; }
+  [hidden] { display: none !important; } /* #lock sets display, which would otherwise beat the hidden attribute */
   #lock { position: fixed; inset: 0; display: grid; place-items: center; }
   #lock input {
     width: 12ch; padding: 10px 0; border: 0; border-bottom: 1px solid #333;
