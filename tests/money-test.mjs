@@ -89,9 +89,107 @@ async function sync() {
   H.close();
 }
 
+// ---- Screens (Task 7b) ----
+const mText = H => H.eval(`document.getElementById('money').innerText`);
+const mHas = (H, t, ms = 6000) => H.waitFor(`document.getElementById('money').innerText.includes(${JSON.stringify(t)})`, ms);
+const click = (H, sel) => H.eval(`document.querySelector(${JSON.stringify(sel)}).click()`);
+const setVal = (H, sel, v) => H.eval(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); e.value = ${JSON.stringify(v)}; e.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+const hero = H => H.eval(`document.querySelector('#money .hero .big')?.innerText.replace(/\\s/g, '') ?? ''`);
+const shown = (H, sel) => H.waitFor(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); return !!e && !e.closest('[hidden]'); })()`);
+
+async function screens() {
+  const H = await fresh();
+  await check('U1 no tokens: plain empty state that opens Money settings', async () => {
+    assert.ok(await mHas(H, 'Connect Up to see your money here.'), await mText(H));
+    await click(H, '#m-connect');
+    assert.ok(await shown(H, '#m-settings'), 'settings open');
+  });
+  await check('U2 names and tokens: a bad token is refused, good ones sync and fill Money', async () => {
+    for (const [sel, v] of [['#n-me-first', 'Alex'], ['#n-me-sur', 'Smith'], ['#n-p-first', 'Sam'], ['#n-p-sur', 'Jones']]) await setVal(H, sel, v);
+    await click(H, '#n-save');
+    await setVal(H, '#t-me', 'up:yeah:wrong'); await click(H, '#t-me-save');
+    assert.ok(await H.waitFor(`document.getElementById('t-me-msg').textContent === 'Up rejected that token.'`), 'rejected message');
+    await setVal(H, '#t-me', TOKENS.me); await click(H, '#t-me-save');
+    await setVal(H, '#t-partner', TOKENS.partner); await click(H, '#t-partner-save');
+    assert.ok(await H.waitFor(`document.getElementById('t-me-msg').textContent === 'Connected' && document.getElementById('t-partner-msg').textContent === 'Connected'`, 8000), 'connected');
+    await click(H, '#m-settings-back');
+    assert.ok(await H.waitFor(`document.querySelector('#money .hero .big')?.innerText.replace(/\\s/g, '') === '905.59'`, 10000), await hero(H));
+    assert.ok(await mHas(H, 'Updated just now'), 'freshness');
+  });
+  await check('U3 Whose: each view adds up its own money', async () => {
+    const pick = async v => { await H.eval(`document.querySelector('#money .whose [data-v="${v}"]').click()`); await H.wait(150); return hero(H); };
+    assert.deepEqual([await pick('me'), await pick('partner'), await pick('joint'), await pick('all')], ['774.59', '91.00', '40.00', '905.59']);
+    assert.deepEqual(await H.eval(`[...document.querySelectorAll('#money .whose button')].map(b => b.textContent)`), ['All', 'Alex', 'Sam', 'Joint']);
+  });
+  await check('U4 savers and the 2Up split', async () => {
+    assert.ok(await mHas(H, '$7,152.00'), 'savings total');
+    for (const t of ['House deposit', 'Holiday', 'Rainy day', '+$103.92 this month', 'Alex $3,050.00 · Sam $3,600.00 · joint $502.00']) assert.ok((await mText(H)).includes(t), t);
+    assert.ok((await mText(H)).includes('Alex $182.55') && (await mText(H)).includes('Sam $319.45'), 'House split');
+  });
+  await check('U5 last month: balances at its end, no Coming, closed-savers note', async () => {
+    await click(H, '#money [data-act="month"][data-d="-1"]');
+    assert.ok(await mHas(H, 'October 2026'), 'month title');
+    const t = await mText(H);
+    assert.ok(t.includes('$1,696.08'), 'Holiday at 31 Oct');
+    assert.ok(!t.includes('COMING') && !t.includes('Coming'), 'no Coming');
+    assert.ok(t.trim().endsWith("Closed savers aren't shown."), t.trim().slice(-120));
+    await click(H, '#money [data-act="month"][data-d="1"]');
+    assert.ok(await mHas(H, 'November 2026'));
+  });
+  await check('U6 a transaction shows everything Up knows; Receipt fetches the attachment', async () => {
+    await click(H, '#money [data-tx="a-woo-5"]');
+    assert.ok(await shown(H, '#m-sheet'), 'sheet open');
+    const t = await H.eval(`document.getElementById('m-sheet').innerText`);
+    for (const s of ['Woolworths Toowong', '−$34.20', 'Groceries', 'weekly-shop', 'card ··4821', '$0.80', 'WOOLWORTHS 4410 TOOWONG QLD AUS', 'Big shop', 'Open in Up']) assert.ok(t.includes(s), s);
+    H.up.calls.length = 0;
+    await click(H, '#m-receipt');
+    assert.ok(await H.waitFor(`!!document.querySelector('#m-sheet a[href="https://up-attachments.example/att-1.jpg"]')`), 'receipt link');
+    assert.ok(H.up.calls.some(c => c.startsWith('GET attachments/att-1')), H.up.calls.join('|'));
+    await click(H, '#m-sheet-close');
+  });
+  await check('U7 a category chip filters the feed', async () => {
+    await click(H, '#money .chip[data-cat="transport"]');
+    await H.wait(150);
+    const parents = await H.eval(`[...document.querySelectorAll('#money .feed [data-tx]')].map(e => e.dataset.parent)`);
+    assert.ok(parents.length > 0 && parents.every(p => p === 'transport'), parents.join(','));
+    await click(H, '#money .chip[data-cat=""]');
+  });
+  await check('U11 balance over time for a saver', async () => {
+    await click(H, '#money [data-acct="a-holiday"]');
+    assert.ok(await shown(H, '#m-balance'), 'balance sheet');
+    const t = await H.eval(`document.getElementById('m-balance').innerText`);
+    assert.ok(t.includes('Today $1,800.00') && t.includes('Start $1,696.08'), t);
+    await click(H, '#m-balance-close');
+  });
+  await check('U8 offline later: everything from the phone, says how old it is', async () => {
+    H.up.offline = true;
+    await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`document.querySelector('#money .hero .big')?.innerText.replace(/\\s/g, '') === '905.59'`, 8000), await hero(H));
+    assert.ok(await mHas(H, 'Offline · from'), await mText(H));
+    H.up.offline = false;
+  });
+  await check('U10 only reads from Up, nothing else', async () => {
+    assert.ok(H.up.calls.length > 0 && H.up.calls.every(c => c.startsWith('GET ')), H.up.calls.filter(c => !c.startsWith('GET ')).join('|'));
+  });
+  await check('U9 4,000 transactions: fast first paint, feed capped with Show earlier', async () => {
+    H.up.offline = true;
+    await H.eval(`(async () => { const s = await import('./money-store.js'); const d = await s.load(); const base = d.pulls.me.transactions.find(t => t.id === 'a-woo-4');
+      const many = Array.from({ length: 4000 }, (_, i) => { const t = structuredClone(base); t.id = 'g' + i; t.attributes.createdAt = new Date(2026, 10, 1 + (i % 13), 8, i % 60).toISOString(); return t; });
+      await s.saveFull('me', d.pulls.me.accounts, [...d.pulls.me.transactions, ...many]); })()`);
+    await H.reload(); await H.signIn();
+    assert.ok(await H.waitFor(`(document.querySelector('#money .hero .big')?.innerText.replace(/\\s/g, '') ?? '').length > 6`, 10000), 'hero painted');
+    const ms = await H.eval(`performance.now()`);
+    const rows = await H.eval(`document.querySelectorAll('#money .feed [data-tx]').length`);
+    H.up.offline = false;
+    assert.ok(rows <= 150 && await H.eval(`!!document.querySelector('#money [data-act="earlier"]')`), `rows ${rows}`);
+    assert.ok(ms < 4000, `painted by ${Math.round(ms)} ms after navigation`);
+  });
+  H.close();
+}
+
 // ONLY=sync,screens runs just those sections (for debugging); the gates always run everything.
 const only = process.env.ONLY?.split(',');
-const sections = { sync };
+const sections = { sync, screens };
 for (const [name, fn] of Object.entries(sections)) if (!only || only.includes(name)) await fn();
 console.log(`money-test: ${passed}/${total} passed`);
 process.exit(passed === total ? 0 : 1);
