@@ -1,3 +1,6 @@
 gates/
 explore/
 .unlazy-hook-state.json
+# Money docs name a third person and describe real accounts: keep them on this PC only
+docs/superpowers/specs/*money*
+docs/superpowers/plans/*money*
