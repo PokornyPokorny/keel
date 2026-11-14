@@ -42,6 +42,8 @@
   button:focus-visible, input:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 
   /* Photo a day */
+  .ph-top { position: sticky; top: 0; padding: calc(env(safe-area-inset-top) + 8px) 16px 0; background: #000; z-index: 1; }
+  .ph-top .plain { min-width: 0; padding: 10px 4px; color: #fff; }
   .home {
     min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 16px; text-align: center;
@@ -112,10 +114,11 @@
   <p class="error" role="alert"></p>
 </div>
 
-<main id="app" hidden></main>
+<main id="app" hidden><div id="money-root"></div><div id="photos-root"></div></main>
 
 <script type="module">
   import { startPhotos } from './photos.js';
+  import { startMoney } from './money.js';
   navigator.serviceWorker?.register('sw.js').catch(() => {}); // lets Keel open with no signal
   // Same model as Yarvo Box Stock: this page is public, the data lives in a private repo,
   // and the "GitHub code" is a fine-grained token that can only reach that repo.
@@ -130,7 +133,7 @@
   const put = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 
   const photos = startPhotos({
-    root: $('app'),
+    root: $('photos-root'),
     getToken: () => get(TOKEN_KEY),
     // A rejected code goes back to the paste screen; photos waiting to upload stay queued.
     onUnauthorized() {
@@ -140,9 +143,11 @@
       fail('token', REJECTED);
     },
   });
+  // Money is Keel's home; photo a day lives behind its Photos link (and its daily prompt).
+  const money = startMoney({ root: $('money-root'), onPhotos: () => photos.openHome() });
   function show(id) {
     screens.forEach(s => $(s).hidden = s !== id);
-    if (id === 'app') photos.refresh();
+    if (id === 'app') { money.refresh(); photos.refresh(); }
   }
 
   const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));

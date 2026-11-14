@@ -13,13 +13,16 @@ const plural = n => `${n} ${n === 1 ? 'day' : 'days'}`;
 
 export function startPhotos({ root, getToken, onUnauthorized }) {
   root.innerHTML = `
-    <section class="home">
-      <p id="today"></p>
-      <button id="open-camera" hidden>Open camera · one shot</button>
-      <p id="message" role="status"></p>
-      <p id="month-line"></p>
-      <nav id="months" aria-label="Past months"></nav>
-    </section>
+    <div id="photos-home" class="layer scroll" hidden>
+      <div class="ph-top"><button type="button" class="plain" id="photos-back">‹ Money</button></div>
+      <section class="home">
+        <p id="today"></p>
+        <button id="open-camera" hidden>Open camera · one shot</button>
+        <p id="message" role="status"></p>
+        <p id="month-line"></p>
+        <nav id="months" aria-label="Past months"></nav>
+      </section>
+    </div>
     <div id="camera" class="layer" hidden>
       <video playsinline muted autoplay></video>
       <div class="camera-bar">
@@ -373,7 +376,7 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
   // Leaving the app with the camera open loses the day (it was marked used when the picture appeared).
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { if (cam) { closeCamera(); renderHome(); } }
-    else if (!root.hidden) refresh();            // back in Keel: upload what's waiting, catch up
+    else if (!root.closest('[hidden]')) refresh(); // back in Keel (and unlocked): upload what's waiting, catch up
   });
   window.addEventListener('online', async () => {
     await flushQueue();
@@ -391,5 +394,10 @@ export function startPhotos({ root, getToken, onUnauthorized }) {
     const pending = pendingReveals(loaded, m => local.revealPos(m) === 'done', new Date());
     if (pending.length) startReveal(pending.map(m => loaded.find(x => x.month === m)));
   }
-  return { refresh };
+  const photosHome = $('#photos-home');
+  $('#photos-back').addEventListener('click', () => { photosHome.hidden = true; });
+  return {
+    refresh,
+    openHome() { photosHome.hidden = false; photosHome.scrollTop = 0; renderHome(); },
+  };
 }

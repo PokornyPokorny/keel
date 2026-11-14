@@ -18,9 +18,21 @@ const inPage = (H, body) => H.eval(`(async () => {
   ${body}
 })()`);
 
+const openPhotos = async H => {
+  await H.waitFor(`!!document.getElementById('photos-link')`);
+  await H.eval(`document.getElementById('photos-link').click()`);
+};
+// Signed in, on the photo home (Money is Keel's home now; Photos sits behind its link).
+async function enter(H) {
+  await H.signIn();
+  await H.waitFor(`!!document.getElementById('photos-link')`);
+  await H.eval(`document.getElementById('photos-link').click()`);
+  await H.waitFor(`!document.getElementById('photos-home').hidden`);
+}
+
 async function storage() {
   const H = await launch({ local });
-  await H.open(); await H.signIn();
+  await H.open(); await enter(H);
   const jpeg = await makeJpeg(H, 'S1'), j64 = jpeg.toString('base64');
   const path = 'photos/2026/11/2026-11-14.jpg';
 
@@ -74,11 +86,11 @@ async function shoot(H) {
   await H.eval(`document.querySelector('[aria-label="Take photo"]').click()`);
 }
 const homeHas = (H, s, ms = 5000) => H.waitFor(`document.getElementById('app').innerText.includes(${JSON.stringify(s)})`, ms);
-const dayOpen = async (H, iso) => { await H.setClock(iso); await H.reload(); await H.signIn(); await H.wait(500); };
+const dayOpen = async (H, iso) => { await H.setClock(iso); await H.reload(); await enter(H); await H.wait(500); };
 
 async function cameraErrors() {
   let H = await launch({ local, camera: 'denied' });
-  await H.setClock('2026-11-14T09:00'); await H.open(); await H.signIn();
+  await H.setClock('2026-11-14T09:00'); await H.open(); await enter(H);
   await check('C2 blocked camera: plain message, today not used', async () => {
     await openCamera(H);
     assert.ok(await homeHas(H, "Camera blocked. Allow camera access for Keel, then try again. Today isn't used."), await text(H));
@@ -87,7 +99,7 @@ async function cameraErrors() {
   });
   H.close();
   H = await launch({ local, camera: 'none' });
-  await H.setClock('2026-11-14T09:00'); await H.open(); await H.signIn();
+  await H.setClock('2026-11-14T09:00'); await H.open(); await enter(H);
   await check('C2b no camera: plain message, today not used', async () => {
     await openCamera(H);
     assert.ok(await homeHas(H, "No camera found. Today isn't used."), await text(H));
@@ -98,7 +110,7 @@ async function cameraErrors() {
 
 async function camera() {
   const H = await launch({ local });
-  await H.setClock('2026-11-14T09:00'); await H.open(); await H.signIn(); await H.wait(500);
+  await H.setClock('2026-11-14T09:00'); await H.open(); await enter(H); await H.wait(500);
   const file = day => H.github.files.get(`photos/${day.slice(0, 4)}/${day.slice(5, 7)}/${day}.jpg`);
   const queued = () => inPage(H, `return l.queuedDays()`);
 
@@ -125,7 +137,7 @@ async function camera() {
     assert.equal(await H.eval(`document.querySelectorAll('#app img').length`), 0);
   });
   await check('C5 after reload today stays done, no camera offered', async () => {
-    await H.reload(); await H.signIn();
+    await H.reload(); await enter(H);
     assert.ok(await homeHas(H, "Today's done"), await text(H));
     assert.equal(await visible(H, '#open-camera'), false);
   });
@@ -139,7 +151,7 @@ async function camera() {
     await H.wait(500);
     assert.equal(await H.eval(`__tracks.length > 0 && __tracks.every(t => t.readyState === 'ended')`), true, 'tracks stopped');
     assert.ok(await homeHas(H, 'No photo today'), await text(H));
-    await H.reload(); await H.signIn();
+    await H.reload(); await enter(H);
     assert.ok(await homeHas(H, 'No photo today'), await text(H));
     assert.equal(file('2026-11-15'), undefined);
   });
@@ -163,7 +175,7 @@ async function camera() {
     assert.ok(await homeHas(H, "Today's done"), await text(H));
     await H.wait(1500);
     assert.deepEqual(await queued(), ['2026-11-17']);
-    await H.reload(); await H.signIn(); await H.wait(1500);
+    await H.reload(); await enter(H); await H.wait(1500);
     assert.deepEqual(await queued(), []);
     assert.equal((await text(H)).includes('Another phone'), false);
     assert.equal(H.github.commits.filter(c => c.path.endsWith('2026-11-17.jpg')).length, 1);
@@ -176,17 +188,17 @@ async function camera() {
     const other = await makeJpeg(H, 'other phone');
     H.github.seed('photos/2026/11/2026-11-18.jpg', other);
     H.setOffline(false);
-    await H.reload(); await H.signIn();
+    await H.reload(); await enter(H);
     assert.ok(await homeHas(H, 'Another phone already saved 18 Nov. The photo from this phone was dropped.'), await text(H));
     assert.deepEqual(await queued(), []);
     assert.ok(file('2026-11-18').bytes.equals(other));
-    await H.reload(); await H.signIn(); await H.wait(800);
+    await H.reload(); await enter(H); await H.wait(800);
     assert.equal((await text(H)).includes('Another phone'), false);
   });
   await check('C10 today already on GitHub (other phone): no camera offered', async () => {
     await H.setClock('2026-11-19T09:00');
     H.github.seed('photos/2026/11/2026-11-19.jpg', await makeJpeg(H, 'c10'));
-    await H.reload(); await H.signIn();
+    await H.reload(); await enter(H);
     assert.ok(await homeHas(H, "Today's done"), await text(H));
     assert.equal(await visible(H, '#open-camera'), false);
   });
@@ -263,19 +275,20 @@ async function camera() {
     await H.setClock('2026-11-25T09:00');
     H.github.delayMs = 20000;
     await H.reload();
+    await openPhotos(H);
     const ok = await homeHas(H, 'Open camera · one shot', 3000) && await homeHas(H, 'November · ', 500);
     H.github.delayMs = 0;
     assert.ok(ok, await text(H));
   });
   await check('C20 GitHub listing lags after an upload: never "No photo today" for a taken photo', async () => {
-    await H.reload(); await H.signIn(); await H.wait(800);
+    await H.reload(); await enter(H); await H.wait(800);
     H.github.listLagMs = 8000;
     await openCamera(H); await shoot(H);
     for (let i = 0; i < 30 && !file('2026-11-25'); i++) await H.wait(100);
     assert.ok(file('2026-11-25'), 'uploaded');
     let sawNoPhoto = false;
     for (let i = 0; i < 20; i++) { if ((await text(H)).includes('No photo today')) sawNoPhoto = true; await H.wait(100); }
-    await H.reload(); await H.signIn(); await H.wait(800);
+    await H.reload(); await enter(H); await H.wait(800);
     const afterReload = await text(H);
     H.github.listLagMs = 0;
     assert.equal(sawNoPhoto, false, 'flashed No photo today');
@@ -355,12 +368,12 @@ const OCT_MISSED = [5, 12, 19, 26];
 
 async function revealAndGrid() {
   const H = await launch({ local });
-  await H.setClock('2026-10-31T23:59:00'); await H.open(); await H.signIn();
+  await H.setClock('2026-10-31T23:59:00'); await H.open(); await enter(H);
   for (let d = 1; d <= 31; d++) if (!OCT_MISSED.includes(d)) {
     const day = `2026-10-${String(d).padStart(2, '0')}`;
     H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
   }
-  await H.reload(); await H.signIn(); await H.wait(800);
+  await H.reload(); await enter(H); await H.wait(800);
 
   await check('R1 before the 1st: no reveal, month only counted', async () => {
     assert.ok(await homeHas(H, 'October · 27 days'), await text(H));
@@ -370,7 +383,7 @@ async function revealAndGrid() {
   // September is seeded only now: on 31 Oct it is already unlocked, so it would (rightly) reveal during R1.
   for (const day of ['2026-09-03', '2026-09-20']) H.github.seed(`photos/2026/09/${day}.jpg`, await makeJpeg(H, day));
   await check('R2 on the 1st the reveal starts by itself, oldest month first', async () => {
-    await H.setClock('2026-11-01T00:00:30'); await H.reload(); await H.signIn();
+    await H.setClock('2026-11-01T00:00:30'); await H.reload(); await enter(H);
     assert.ok(await labelIs(H, '3 Sep · 1/2'), await label(H));
   });
   await check('R3 tapping runs on into the next month', async () => {
@@ -380,7 +393,7 @@ async function revealAndGrid() {
   await check('R4 swipe goes back; an interrupted reveal resumes at the same photo', async () => {
     for (const want of ['2 Oct · 2/27', '3 Oct · 3/27', '4 Oct · 4/27', '6 Oct · 5/27']) { await tap(H); assert.ok(await labelIs(H, want), await label(H)); }
     await swipeBack(H); assert.ok(await labelIs(H, '4 Oct · 4/27'), await label(H));
-    await H.reload(); await H.signIn();
+    await H.reload(); await enter(H);
     assert.ok(await labelIs(H, '4 Oct · 4/27'), await label(H));
   });
   await check('R5 after the last photo: the month grid, Monday first, misses empty', async () => {
@@ -394,7 +407,7 @@ async function revealAndGrid() {
     assert.deepEqual(cells.filter(c => c.startsWith('m')), ['m5', 'm12', 'm19', 'm26']);
   });
   await check('R6 later: no reveal, months listed newest first, grid and full view open', async () => {
-    await H.reload(); await H.signIn(); await H.wait(800);
+    await H.reload(); await enter(H); await H.wait(800);
     assert.equal(await visible(H, '#reveal'), false);
     assert.deepEqual(await H.eval(`[...document.querySelectorAll('#months .month-row')].map(b => b.textContent.trim())`),
       ['October · 27 of 31 days', 'September · 2 of 30 days']);
@@ -419,9 +432,9 @@ async function revealAndGrid() {
 
 async function revealOffline() {
   const H = await launch({ local });
-  await H.setClock('2026-10-20T09:00'); await H.open(); await H.signIn();
+  await H.setClock('2026-10-20T09:00'); await H.open(); await enter(H);
   for (const day of ['2026-10-02', '2026-10-09', '2026-10-16', '2026-10-23']) H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
-  await H.reload(); await H.signIn();
+  await H.reload(); await enter(H);
   assert.ok(await homeHas(H, 'October · 4 days'));
   await check('R7 offline on the 1st with nothing downloaded: waits, does not skip, resumes online', async () => {
     H.setOffline(true);
@@ -453,13 +466,13 @@ async function revealOffline() {
 
 async function revealSlow() {
   const H = await launch({ local });
-  await H.setClock('2026-10-20T09:00'); await H.open(); await H.signIn();
+  await H.setClock('2026-10-20T09:00'); await H.open(); await enter(H);
   for (const day of ['2026-10-02', '2026-10-09', '2026-10-16']) H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
-  await H.reload(); await H.signIn();
+  await H.reload(); await enter(H);
   assert.ok(await homeHas(H, 'October · 3 days'));
   await check('R9 slow download: taps wait for the photo instead of skipping it', async () => {
     H.github.delayRawMs = 2500;
-    await H.setClock('2026-11-01T08:00'); await H.reload(); await H.signIn();
+    await H.setClock('2026-11-01T08:00'); await H.reload(); await enter(H);
     assert.ok(await labelIs(H, '2 Oct · 1/3'), await label(H));
     await tapNow(H); await tapNow(H); await H.wait(300);
     assert.equal(await label(H), '2 Oct · 1/3');
@@ -473,13 +486,14 @@ async function revealSlow() {
 
 async function offlineShell() {
   const H = await launch({ local });
-  await H.setClock('2026-10-20T09:00'); await H.open(); await H.signIn(); await H.wait(800);
+  await H.setClock('2026-10-20T09:00'); await H.open(); await enter(H); await H.wait(800);
   await check('O1 Keel opens with no signal at all (cold start, nothing from the network)', async () => {
     assert.ok(await H.waitFor(`!!navigator.serviceWorker?.controller`, 8000), 'service worker controls the page');
     await H.wait(1000);                                   // let the shell finish caching
     H.setSiteOffline(true); H.setOffline(true);
     await H.reload();
     assert.ok(await H.waitFor(`!document.getElementById('app')?.hidden`, 5000), 'app shown');
+    await openPhotos(H);
     assert.ok(await homeHas(H, 'Open camera · one shot'), await text(H));
     H.setSiteOffline(false); H.setOffline(false);
   });

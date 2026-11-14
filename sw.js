@@ -1,6 +1,6 @@
 // Keeps Keel's own files on the phone so it opens with no signal. Never touches the GitHub API:
 // photos and listings are handled by the page (and its own on-phone storage).
-const SHELL = ['./', 'index.html', 'days.js', 'github.js', 'local.js', 'photos.js', 'manifest.webmanifest',
+const SHELL = ['./', 'index.html', 'days.js', 'github.js', 'local.js', 'photos.js', 'money.js', 'money-rules.js', 'up.js', 'money-store.js', 'manifest.webmanifest',
                'icon-180.png', 'icon-192.png', 'icon-512.png'];
 const CACHE = 'keel-shell';
 
