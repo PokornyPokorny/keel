@@ -74,6 +74,62 @@ class FakeGitHub {
 }
 const json = (status, obj) => ({ status, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
 
+// Fake Up Bank API v1. Each token sees its own accounts and transactions plus the joint ones.
+export const UP = 'https://api.up.com.au/api/v1/';
+class FakeUp {
+  tokens = {};                 // { me, partner }: reassign one to revoke it
+  offline = false;
+  rateLimitNext = null;        // seconds: the next request gets a 429 with Retry-After
+  calls = [];                  // 'METHOD path?query who'
+  data = { me: null, partner: null, joint: { accounts: [], transactions: [] } };
+  categories = []; tags = []; attachments = {};
+  load(f) {
+    this.data = { me: structuredClone(f.me), partner: structuredClone(f.partner), joint: structuredClone(f.joint) };
+    this.categories = f.categories; this.tags = f.tags; this.attachments = f.attachments;
+    return this;
+  }
+  #list(key) { return this.data[key].transactions; }
+  add(key, t) { this.#list(key).push(t); }
+  replace(key, id, t) { const l = this.#list(key); l[l.findIndex(x => x.id === id)] = t; }
+  remove(key, id) { const l = this.#list(key); l.splice(l.findIndex(x => x.id === id), 1); }
+
+  handle(method, url, headers) {
+    if (method === 'OPTIONS') return { status: 204 };
+    if (this.offline) return 'offline';
+    const u = new URL(url), path = u.pathname.slice(new URL(UP).pathname.length);
+    const auth = (headers.Authorization || headers.authorization || '').replace(/^Bearer /, '');
+    const who = Object.keys(this.tokens).find(k => this.tokens[k] && this.tokens[k] === auth);
+    this.calls.push(`${method} ${path}${u.search} ${who ?? 'nobody'}`);
+    if (this.rateLimitNext != null) {
+      const s = this.rateLimitNext; this.rateLimitNext = null;
+      return { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': String(s) }, body: JSON.stringify({ errors: [{ status: '429', title: 'Too Many Requests' }] }) };
+    }
+    if (!who) return json(401, { errors: [{ status: '401', title: 'Not Authorized', detail: 'The request was not authenticated because no valid credential was found in the Authorization header, or the Authorization header was not present.' }] });
+    if (method !== 'GET') return json(405, { errors: [{ status: '405' }] });
+    const mine = this.data[who];
+    if (!mine) return json(401, { errors: [{ status: '401' }] });
+    const page = (items) => {
+      const size = Number(u.searchParams.get('page[size]') || 10), after = Number(u.searchParams.get('page[after]') || 0);
+      const next = after + size < items.length ? (() => { const n = new URL(u); n.searchParams.set('page[after]', String(after + size)); return n.toString(); })() : null;
+      return json(200, { data: items.slice(after, after + size), links: { prev: null, next } });
+    };
+    if (path === 'util/ping') return json(200, { meta: { id: 'ping', statusEmoji: '⚡️' } });
+    if (path === 'accounts') return page([...mine.accounts, ...this.data.joint.accounts]);
+    if (path === 'transactions') {
+      const since = u.searchParams.get('filter[since]');
+      let items = [...mine.transactions, ...this.data.joint.transactions];
+      if (since) items = items.filter(t => new Date(t.attributes.createdAt) >= new Date(since));
+      items.sort((a, b) => new Date(b.attributes.createdAt) - new Date(a.attributes.createdAt));
+      return page(items);
+    }
+    if (path === 'categories') return json(200, { data: this.categories });
+    if (path === 'tags') return page(this.tags);
+    const att = path.match(/^attachments\/(.+)$/);
+    if (att) return this.attachments[att[1]] ? json(200, { data: this.attachments[att[1]] }) : json(404, { errors: [{ status: '404' }] });
+    return json(404, { errors: [{ status: '404', title: 'Not Found' }] });
+  }
+}
+
 export async function launch({ local = false, camera = 'granted' } = {}) {
   // Local mode serves the working tree from http://localhost (a secure context, so passkeys and service workers
   // work); the service worker's own fetches can't be intercepted over CDP, so a real server is the honest path.
@@ -110,14 +166,14 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
   const ws = new WebSocket(version.webSocketDebuggerUrl);
   await new Promise((ok, bad) => { ws.onopen = ok; ws.onerror = bad; });
 
-  const github = new FakeGitHub();
+  const github = new FakeGitHub(), up = new FakeUp();
   let id = 0, page = null; const pending = {};
   const raw = (method, params = {}, sessionId) => new Promise((ok, bad) => {
     pending[++id] = m => m.error ? bad(new Error(`${method}: ${m.error.message}`)) : ok(m.result);
     ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
   const send = (method, params = {}) => raw(method, params, page); // tests talk to the page
-  const intercept = { patterns: [{ urlPattern: API + '*' }, ...(local ? [] : [{ urlPattern: SITE + '*' }])] };
+  const intercept = { patterns: [{ urlPattern: API + '*' }, { urlPattern: UP + '*' }, ...(local ? [] : [{ urlPattern: SITE + '*' }])] };
 
   ws.onmessage = async e => {
     const m = JSON.parse(e.data);
@@ -142,6 +198,13 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
         const headers = Object.entries({ ...cors, ...(r.headers || {}) }).map(([name, value]) => ({ name, value }));
         return await reply('Fetch.fulfillRequest', { responseCode: r.status, responseHeaders: headers, body: b64(r.body ?? '') });
       }
+      if (request.url.startsWith(UP)) {
+        const r = up.handle(request.method, request.url, request.headers);
+        if (r === 'offline') return await reply('Fetch.failRequest', { errorReason: 'InternetDisconnected' });
+        const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Expose-Headers': 'Retry-After' };
+        const headers = Object.entries({ ...cors, ...(r.headers || {}) }).map(([name, value]) => ({ name, value }));
+        return await reply('Fetch.fulfillRequest', { responseCode: r.status, responseHeaders: headers, body: b64(r.body ?? '') });
+      }
       if (request.url.startsWith(SITE) && siteOffline) return await reply('Fetch.failRequest', { errorReason: 'InternetDisconnected' });
       return await reply('Fetch.continueRequest', {});
     } catch (err) { if (process.env.HARNESS_DEBUG || !/Invalid InterceptionId|No session|Session with given id/.test(err.message)) console.error('harness:', request.url, err.message); } // the page moved on
@@ -159,7 +222,7 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
 
   let clockScript = null;
   const H = {
-    github, send, wait,
+    github, up, send, wait,
     async eval(expression) {
       const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true });
       if (r.exceptionDetails) throw new Error('page: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text));
