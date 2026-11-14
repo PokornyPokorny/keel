@@ -40,6 +40,33 @@
   button:disabled { opacity: .5; }
   button.plain { background: none; color: #8e8e93; font-weight: 400; }
   button:focus-visible, input:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+
+  /* Photo a day */
+  .home {
+    min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px; text-align: center;
+    padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom);
+  }
+  .home p { margin: 0; max-width: 320px; }
+  #today { font-size: 22px; }
+  #today:empty, #message:empty { display: none; }
+  #message, #month-line { color: #8e8e93; font-size: 15px; }
+  .layer { position: fixed; inset: 0; z-index: 10; background: #000; }
+  .layer video { width: 100%; height: 100%; object-fit: cover; }
+  .layer video.mirror { transform: scaleX(-1); }
+  .camera-bar {
+    position: absolute; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom) + 32px);
+    display: flex; justify-content: center; align-items: center;
+  }
+  .shutter {
+    width: 76px; height: 76px; min-width: 0; padding: 0; border-radius: 50%;
+    background: #fff; border: 4px solid #000; box-shadow: 0 0 0 3px #fff;
+  }
+  .shutter:active { background: #ccc; }
+  .flip {
+    position: absolute; right: 24px; min-width: 0; padding: 10px 16px;
+    background: rgba(0,0,0,.45); color: #fff; font-weight: 400; font-size: 15px;
+  }
 </style>
 </head>
 <body>
@@ -64,7 +91,8 @@
 
 <main id="app" hidden></main>
 
-<script>
+<script type="module">
+  import { startPhotos } from './photos.js';
   // Same model as Yarvo Box Stock: this page is public, the data lives in a private repo,
   // and the "GitHub code" is a fine-grained token that can only reach that repo.
   const DATA_REPO = 'PokornyPokorny/keel-data';
@@ -72,10 +100,24 @@
 
   const $ = id => document.getElementById(id);
   const screens = ['token', 'setup', 'locked', 'app'];
-  const show = id => screens.forEach(s => $(s).hidden = s !== id);
   const fail = (id, msg) => { $(id).querySelector('.error').textContent = msg; };
   const get = k => { try { return localStorage.getItem(k); } catch { return null; } };
   const put = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+
+  const photos = startPhotos({
+    root: $('app'),
+    getToken: () => get(TOKEN_KEY),
+    // A rejected code goes back to the paste screen; photos waiting to upload stay queued.
+    onUnauthorized() {
+      try { localStorage.removeItem(TOKEN_KEY); } catch {}
+      show('token');
+      fail('token', 'GitHub rejected the saved code.');
+    },
+  });
+  function show(id) {
+    screens.forEach(s => $(s).hidden = s !== id);
+    if (id === 'app') photos.refresh();
+  }
 
   const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
   const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));

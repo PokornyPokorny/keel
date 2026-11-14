@@ -34,6 +34,9 @@ await H.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: fals
 await H.eval(`Object.defineProperty(document,'hidden',{configurable:true,get:()=>true}); document.dispatchEvent(new Event('visibilitychange'))`); await H.wait(300);
 await log('app hidden');
 
-const calls = H.github.calls;
-console.log('api calls:', calls.length, calls.every(c => c.startsWith('GET https://api.github.com/repos/PokornyPokorny/keel-data ')) ? 'all to keel-data' : calls);
+// "api calls" counts the code checks (GET on the repo itself); every call of any kind must stay inside keel-data.
+const REPO = 'https://api.github.com/repos/PokornyPokorny/keel-data';
+const calls = H.github.calls, url = c => c.split(' ')[1];
+const codeChecks = calls.filter(c => c.startsWith('GET ') && url(c) === REPO);
+console.log('api calls:', codeChecks.length, calls.every(c => url(c) === REPO || url(c).startsWith(REPO + '/contents/')) ? 'all to keel-data' : calls);
 H.close(); process.exit(0);
