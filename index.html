@@ -67,6 +67,29 @@
     position: absolute; right: 24px; min-width: 0; padding: 10px 16px;
     background: rgba(0,0,0,.45); color: #fff; font-weight: 400; font-size: 15px;
   }
+
+  #months { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+  .month-row { min-width: 0; padding: 10px 16px; color: #fff; font-size: 17px; }
+
+  #reveal, #viewer { display: flex; align-items: center; justify-content: center; cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #reveal img, #viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .reveal-label {
+    position: absolute; left: 16px; bottom: calc(env(safe-area-inset-bottom) + 16px); margin: 0;
+    color: #8e8e93; font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .reveal-wait { color: #8e8e93; margin: 0; }
+
+  .scroll { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  #grid { padding: calc(env(safe-area-inset-top) + 8px) 12px calc(env(safe-area-inset-bottom) + 24px); box-sizing: border-box; }
+  #grid header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  #grid .back { min-width: 0; padding: 8px 4px; color: #fff; }
+  .grid-title { margin: 0; font-size: 17px; font-weight: 600; }
+  .grid-head, .grid-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+  .grid-head span { text-align: center; color: #8e8e93; font-size: 12px; padding-bottom: 4px; }
+  .cell { aspect-ratio: 3 / 4; border-radius: 4px; overflow: hidden; }
+  .cell.photo { min-width: 0; padding: 0; background: #111; }
+  .cell.photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cell.missed { display: flex; align-items: center; justify-content: center; color: #3a3a3c; font-size: 13px; background: #0a0a0a; }
 </style>
 </head>
 <body>
@@ -96,7 +119,8 @@
   // Same model as Yarvo Box Stock: this page is public, the data lives in a private repo,
   // and the "GitHub code" is a fine-grained token that can only reach that repo.
   const DATA_REPO = 'PokornyPokorny/keel-data';
-  const TOKEN_KEY = 'keel-token', PASSKEY_KEY = 'keel-passkey';
+  const TOKEN_KEY = 'keel-token', PASSKEY_KEY = 'keel-passkey', REJECTED_KEY = 'keel-token-rejected';
+  const REJECTED = 'GitHub rejected the saved code.';
 
   const $ = id => document.getElementById(id);
   const screens = ['token', 'setup', 'locked', 'app'];
@@ -110,8 +134,9 @@
     // A rejected code goes back to the paste screen; photos waiting to upload stay queued.
     onUnauthorized() {
       try { localStorage.removeItem(TOKEN_KEY); } catch {}
+      put(REJECTED_KEY, '1'); // keep the reason until a new code is pasted, even across reopening Keel
       show('token');
-      fail('token', 'GitHub rejected the saved code.');
+      fail('token', REJECTED);
     },
   });
   function show(id) {
@@ -163,6 +188,7 @@
       if (r.status === 404 || r.status === 403) return fail('token', 'That code can’t see ' + DATA_REPO + '. Give it Contents access to that repo.');
       if (!r.ok) return fail('token', 'GitHub answered ' + r.status + '. Try again in a minute.');
       put(TOKEN_KEY, token);
+      try { localStorage.removeItem(REJECTED_KEY); } catch {}
       afterToken();
     } catch {
       fail('token', 'No connection. Try again once you have signal.');
@@ -194,7 +220,8 @@
     else if (!document.hidden && !$('locked').hidden) unlock();
   });
 
-  if (get(TOKEN_KEY)) afterToken(); else show('token');
+  if (get(TOKEN_KEY)) afterToken();
+  else { show('token'); if (get(REJECTED_KEY)) fail('token', REJECTED); }
 </script>
 </body>
 </html>

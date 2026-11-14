@@ -190,13 +190,25 @@ async function camera() {
     H.setOffline(false);
     await H.reload();
     assert.ok(await H.waitFor(`!document.getElementById('token').hidden && document.querySelector('#token .error').textContent === 'GitHub rejected the saved code.'`, 5000),
-      await H.eval(`document.body.innerText`));
+      await H.eval(`JSON.stringify({ screen: ['token','setup','locked','app'].filter(s => !document.getElementById(s).hidden), error: document.querySelector('#token .error').textContent })`));
     assert.deepEqual(await queued(), ['2026-11-20']);
     await H.signIn('github_pat_new');
     for (let i = 0; i < 30 && !file('2026-11-20'); i++) await H.wait(100);
     assert.ok(file('2026-11-20'), 'uploaded');
     await H.wait(300);
     assert.deepEqual(await queued(), []);
+  });
+  await check('C11b a code rejected on one open is still explained on the next open', async () => {
+    await dayOpen(H, '2026-11-23T09:00');
+    H.github.token = 'github_pat_newer';
+    await H.eval(`window.dispatchEvent(new Event('online'))`);   // this page meets the 401 itself
+    assert.ok(await H.waitFor(`!document.getElementById('token').hidden`, 5000), 'code screen shown');
+    await H.reload();
+    assert.ok(await H.waitFor(`!document.getElementById('token').hidden && document.querySelector('#token .error').textContent === 'GitHub rejected the saved code.'`, 5000),
+      await H.eval(`JSON.stringify({ screen: ['token','setup','locked','app'].filter(s => !document.getElementById(s).hidden), error: document.querySelector('#token .error').textContent })`));
+    await H.signIn('github_pat_newer');
+    await H.reload();
+    assert.ok(await H.waitFor(`!document.getElementById('app').hidden`, 5000), 'back in the app after re-paste');
   });
   await check('C12 midnight: a shot belongs to the day the camera opened; home rolls over by itself', async () => {
     await dayOpen(H, '2026-11-21T23:59:50');
@@ -216,8 +228,105 @@ async function camera() {
   H.close();
 }
 
-await storage();
-await cameraErrors();
-await camera();
+// ---- Reveal + grid (Task 5) ----
+const label = H => H.eval(`document.querySelector('#reveal .reveal-label')?.textContent ?? ''`);
+const tap = (H, sel = '#reveal') => H.eval(`(() => { const e = document.querySelector(${JSON.stringify(sel)});
+  e.dispatchEvent(new PointerEvent('pointerdown', { clientX: 200, clientY: 300, bubbles: true }));
+  e.dispatchEvent(new PointerEvent('pointerup', { clientX: 200, clientY: 300, bubbles: true })); })()`);
+const swipeBack = H => H.eval(`(() => { const e = document.querySelector('#reveal');
+  e.dispatchEvent(new PointerEvent('pointerdown', { clientX: 60, clientY: 300, bubbles: true }));
+  e.dispatchEvent(new PointerEvent('pointerup', { clientX: 260, clientY: 300, bubbles: true })); })()`);
+const labelIs = (H, want, ms = 5000) => H.waitFor(`document.querySelector('#reveal .reveal-label')?.textContent === ${JSON.stringify(want)}`, ms);
+const OCT_MISSED = [5, 12, 19, 26];
+
+async function revealAndGrid() {
+  const H = await launch({ local });
+  await H.setClock('2026-10-31T23:59:00'); await H.open(); await H.signIn();
+  for (let d = 1; d <= 31; d++) if (!OCT_MISSED.includes(d)) {
+    const day = `2026-10-${String(d).padStart(2, '0')}`;
+    H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
+  }
+  await H.reload(); await H.signIn(); await H.wait(800);
+
+  await check('R1 before the 1st: no reveal, month only counted', async () => {
+    assert.ok(await homeHas(H, 'October · 27 days'), await text(H));
+    assert.equal(await visible(H, '#reveal'), false);
+    assert.equal(await H.eval(`document.querySelectorAll('#app img').length`), 0);
+  });
+  // September is seeded only now: on 31 Oct it is already unlocked, so it would (rightly) reveal during R1.
+  for (const day of ['2026-09-03', '2026-09-20']) H.github.seed(`photos/2026/09/${day}.jpg`, await makeJpeg(H, day));
+  await check('R2 on the 1st the reveal starts by itself, oldest month first', async () => {
+    await H.setClock('2026-11-01T00:00:30'); await H.reload(); await H.signIn();
+    assert.ok(await labelIs(H, '3 Sep · 1/2'), await label(H));
+  });
+  await check('R3 tapping runs on into the next month', async () => {
+    await tap(H); assert.ok(await labelIs(H, '20 Sep · 2/2'), await label(H));
+    await tap(H); assert.ok(await labelIs(H, '1 Oct · 1/27'), await label(H));
+  });
+  await check('R4 swipe goes back; an interrupted reveal resumes at the same photo', async () => {
+    for (const want of ['2 Oct · 2/27', '3 Oct · 3/27', '4 Oct · 4/27', '6 Oct · 5/27']) { await tap(H); assert.ok(await labelIs(H, want), await label(H)); }
+    await swipeBack(H); assert.ok(await labelIs(H, '4 Oct · 4/27'), await label(H));
+    await H.reload(); await H.signIn();
+    assert.ok(await labelIs(H, '4 Oct · 4/27'), await label(H));
+  });
+  await check('R5 after the last photo: the month grid, Monday first, misses empty', async () => {
+    for (let i = 4; i < 27; i++) { await tap(H); assert.ok(await H.waitFor(`document.querySelector('#reveal .reveal-label')?.textContent.endsWith('${i + 1}/27')`, 5000), await label(H)); }
+    await tap(H);
+    assert.ok(await H.waitFor(`!document.getElementById('grid').hidden`, 5000), 'grid shown');
+    assert.equal(await H.eval(`document.querySelector('#grid .grid-title').textContent`), 'October · 27 of 31 days');
+    const cells = await H.eval(`[...document.querySelectorAll('#grid .grid-days .cell')].map(c => c.classList.contains('blank') ? 'b' : c.classList.contains('missed') ? 'm' + c.textContent.trim() : c.querySelector('img') ? 'p' : '?')`);
+    assert.deepEqual(cells.slice(0, 4), ['b', 'b', 'b', 'p']);
+    assert.equal(cells.filter(c => c === 'p').length, 27);
+    assert.deepEqual(cells.filter(c => c.startsWith('m')), ['m5', 'm12', 'm19', 'm26']);
+  });
+  await check('R6 later: no reveal, months listed newest first, grid and full view open', async () => {
+    await H.reload(); await H.signIn(); await H.wait(800);
+    assert.equal(await visible(H, '#reveal'), false);
+    assert.deepEqual(await H.eval(`[...document.querySelectorAll('#months .month-row')].map(b => b.textContent.trim())`),
+      ['October · 27 of 31 days', 'September · 2 of 30 days']);
+    await H.eval(`document.querySelector('#months .month-row').click()`);
+    assert.ok(await H.waitFor(`!document.getElementById('grid').hidden`), 'grid open');
+    await H.eval(`document.querySelector('#grid .cell.photo').click()`);
+    assert.ok(await H.waitFor(`!document.getElementById('viewer').hidden && !!document.querySelector('#viewer img')`), 'full view open');
+    await H.eval(`document.getElementById('viewer').click()`);
+    assert.ok(await H.waitFor(`document.getElementById('viewer').hidden`), 'full view closed');
+  });
+  await check('R8 a revealed month works offline from the phone', async () => {
+    H.setOffline(true);
+    await H.reload(); await H.wait(800);
+    await H.eval(`document.querySelector('#grid .back')?.click()`);
+    await H.eval(`document.querySelector('#months .month-row').click()`);
+    assert.ok(await H.waitFor(`(() => { const imgs = [...document.querySelectorAll('#grid .grid-days img')];
+      return imgs.length === 27 && imgs.every(i => i.complete && i.naturalWidth > 0); })()`, 8000), 'all 27 thumbnails from the phone');
+    H.setOffline(false);
+  });
+  H.close();
+}
+
+async function revealOffline() {
+  const H = await launch({ local });
+  await H.setClock('2026-10-20T09:00'); await H.open(); await H.signIn();
+  for (const day of ['2026-10-02', '2026-10-09']) H.github.seed(`photos/2026/10/${day}.jpg`, await makeJpeg(H, day));
+  await H.reload(); await H.signIn();
+  assert.ok(await homeHas(H, 'October · 2 days'));
+  await check('R7 offline on the 1st with nothing downloaded: waits, does not skip, resumes online', async () => {
+    H.setOffline(true);
+    await H.setClock('2026-11-01T08:00'); await H.reload(); await H.wait(800);
+    assert.ok(await labelIs(H, '2 Oct · 1/2'), await label(H));
+    assert.ok(await H.waitFor(`document.querySelector('#reveal .reveal-wait')?.textContent === 'Waiting for signal'`), 'waiting shown');
+    await tap(H); await H.wait(300);
+    assert.equal(await label(H), '2 Oct · 1/2');
+    assert.equal(await inPage(H, `return l.revealPos('2026-10')`), 0);
+    H.setOffline(false);
+    await H.eval(`window.dispatchEvent(new Event('online'))`);
+    assert.ok(await H.waitFor(`(() => { const i = document.querySelector('#reveal img'); return !!i && i.complete && i.naturalWidth > 0; })()`, 3000), 'photo shows');
+  });
+  H.close();
+}
+
+// ONLY=camera,reveal runs just those sections (for debugging); the gates always run everything.
+const only = process.env.ONLY?.split(',');
+const sections = { storage, cameraErrors, camera, revealAndGrid, revealOffline };
+for (const [name, fn] of Object.entries(sections)) if (!only || only.includes(name)) await fn();
 console.log(`photo-test: ${passed}/${total} passed`);
 process.exit(passed === total ? 0 : 1);

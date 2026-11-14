@@ -99,21 +99,21 @@ export async function launch({ local = false, camera = 'granted' } = {}) {
         if (body === undefined && request.postDataEntries) body = Buffer.concat(request.postDataEntries.map(x => Buffer.from(x.bytes || '', 'base64'))).toString();
         if (body === undefined && request.hasPostData) body = (await send('Network.getRequestPostData', { requestId: networkId })).postData;
         const r = github.handle(request.method, request.url, request.headers, body);
-        if (r === 'offline') return send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' });
+        if (r === 'offline') return await send('Fetch.failRequest', { requestId, errorReason: 'InternetDisconnected' });
         const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, accept, content-type', 'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS' };
         const headers = Object.entries({ ...cors, ...(r.headers || {}) }).map(([name, value]) => ({ name, value }));
-        return send('Fetch.fulfillRequest', { requestId, responseCode: r.status, responseHeaders: headers, body: b64(r.body ?? '') });
+        return await send('Fetch.fulfillRequest', { requestId, responseCode: r.status, responseHeaders: headers, body: b64(r.body ?? '') });
       }
       if (local && request.url.startsWith(SITE)) {
         const rel = new URL(request.url).pathname.slice(new URL(SITE).pathname.length) || 'index.html';
         if (!rel.includes('..') && existsSync(rel)) {
-          return send('Fetch.fulfillRequest', { requestId, responseCode: 200, body: b64(readFileSync(rel)),
+          return await send('Fetch.fulfillRequest', { requestId, responseCode: 200, body: b64(readFileSync(rel)),
             responseHeaders: [{ name: 'Content-Type', value: TYPES[extname(rel)] || 'application/octet-stream' }, { name: 'Cache-Control', value: 'no-store' }] });
         }
-        return send('Fetch.fulfillRequest', { requestId, responseCode: 404, responseHeaders: [], body: '' });
+        return await send('Fetch.fulfillRequest', { requestId, responseCode: 404, responseHeaders: [], body: '' });
       }
-      return send('Fetch.continueRequest', { requestId });
-    } catch (err) { console.error('harness:', err.message); }
+      return await send('Fetch.continueRequest', { requestId });
+    } catch (err) { if (!/Invalid InterceptionId/.test(err.message)) console.error('harness:', err.message); } // the page moved on
   };
 
   await send('Network.enable');

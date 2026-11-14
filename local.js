@@ -38,6 +38,13 @@ export function revealPos(month) {
 }
 export const setRevealPos = (month, v) => put('keel-reveal-' + month, String(v));
 
+// Last listings seen from GitHub, so months still unlock and list offline.
+const getJson = (k, fallback) => { try { return JSON.parse(get(k)) ?? fallback; } catch { return fallback; } };
+export const saveMonths = months => put('keel-months', JSON.stringify(months));
+export const savedMonths = () => getJson('keel-months', []);
+export const saveDays = (month, days) => put('keel-days-' + month, JSON.stringify(days));
+export const savedDays = month => getJson('keel-days-' + month, []);
+
 export function takeNotice() {
   const v = get('keel-notice');
   try { localStorage.removeItem('keel-notice'); } catch {}
