@@ -66,6 +66,60 @@ const cases = {
     assert.deepEqual(ids, ['a-ru-1']);
   },
   'cents': () => assert.equal(R.cents(byId(both().txns, 'a-woo-5')), -3420),
+
+  // ---- Task 3 ----
+  'jointSplit: ported up_dash selftest cases': () => {
+    const ac = (id, c, owner) => ({ id, owner, attributes: { ownershipType: owner === 'joint' ? 'JOINT' : 'INDIVIDUAL', balance: { valueInBaseUnits: c } } });
+    const jt = (acct, amt, day, src, by) => ({ attributes: { createdAt: `2026-09-${String(day).padStart(2, '0')}T10:00:00+10:00`, amount: { valueInBaseUnits: amt },
+      performingCustomer: by ? { displayName: by } : null }, relationships: { account: { data: { id: acct } }, transferAccount: { data: src ? { id: src } : null } } });
+    const accs = [ac('e', 0, 'me'), ac('l', 0, 'partner'), ac('j', 400, 'joint'), ac('s', 152, 'joint'), ac('k', 100, 'joint'), ac('z', 0, 'joint')];
+    const sp = R.jointSplit([jt('j', 400, 1, 'e'), jt('j', 600, 1, 'l'), jt('j', -500, 2), jt('s', 100, 3, 'j'), jt('j', -100, 3, 's'),
+      jt('s', 50, 4, 'e'), jt('s', 2, 5), jt('k', 100, 5, 'gone')], accs, PEOPLE);
+    const r = Object.fromEntries(Object.entries(sp).map(([k, d]) => [k, Object.fromEntries(Object.entries(d).map(([w, v]) => [w, Math.round(v * 10) / 10]))]));
+    assert.deepEqual(r.j, { me: 160, partner: 240 });
+    assert.deepEqual(r.s, { me: 91.2, partner: 60.8 }, '2Up money carries its own split');
+    assert.deepEqual(r.k, { unknown: 100 });
+    assert.deepEqual(r.z, {});
+    assert.deepEqual(R.jointSplit([jt('k', 100, 5, 'gone', '$samjones')], accs, PEOPLE).k, { partner: 100 });
+  },
+  'jointSplit: fixture House and Bills keep the 4:7 split, summing to the balance': () => {
+    const { accounts, txns } = both(), sp = R.jointSplit(txns, accounts, PEOPLE);
+    const near = (a, b) => assert.ok(Math.abs(a - b) < 0.01, `${a} vs ${b}`);
+    near(sp['j-house'].me, 50200 * 4 / 11); near(sp['j-house'].partner, 50200 * 7 / 11);
+    near(sp['j-bills'].me, 2000 * 4 / 11); near(sp['j-bills'].partner, 2000 * 7 / 11);
+  },
+  'balanceAt: ported up_dash selftest (a round-up leaves Spending too)': () => {
+    const accs = [{ id: 'e', owner: 'me', attributes: { balance: { valueInBaseUnits: 2977 } } }];
+    const t = (amt, day, ru) => ({ attributes: { createdAt: `2026-09-0${day}T10:00:00+10:00`, amount: { valueInBaseUnits: amt },
+      roundUp: ru ? { amount: { valueInBaseUnits: ru } } : null }, relationships: { account: { data: { id: 'e' } } } });
+    const txs = [t(5000, 1), t(-2000, 2, -23)];
+    assert.equal(R.balanceAt(accs, txs, new Date(2026, 8, 1, 23, 59, 59)).e, 5000);
+    assert.equal(R.balanceAt(accs, txs, new Date(2026, 8, 3, 23, 59, 59)).e, 2977);
+  },
+  'balanceAt: fixture at the end of October': () => {
+    const { accounts, txns } = both(), b = R.balanceAt(accounts, txns, new Date(2026, 10, 1));
+    assert.equal(b['a-holiday'], 180000 - 312 - 10000 - 80);
+    assert.equal(b['a-rainy'], 125000);
+    assert.equal(b['s-house'], 360000 - 25000);
+    assert.equal(b['j-house'], 50200 - 200 + 6000);
+  },
+  'savers: everyone': () => {
+    const { accounts, txns } = both();
+    const s = R.savers(accounts, txns, 'all', new Date(2026, 10, 1), new Date(2026, 10, 14, 12));
+    assert.equal(s.total, 715200);
+    assert.deepEqual(s.byOwner, { me: 305000, partner: 360000, joint: 50200 });
+    assert.deepEqual(s.rows.map(r => [r.id, r.balance, r.monthDelta, r.kind]),
+      [['s-house', 360000, 25000, 'Saver'], ['a-holiday', 180000, 10392, 'Saver'], ['a-rainy', 125000, 0, 'Saver'], ['j-house', 50200, -5800, '2Up saver']]);
+    assert.equal(s.savedThisMonth, 29592);
+    assert.equal(s.roundupsThisMonth, 80);
+    assert.ok(Math.abs(s.rows.reduce((a, r) => a + r.share, 0) - 1) < 1e-9);
+  },
+  'savers: one person': () => {
+    const { accounts, txns } = both();
+    const s = R.savers(accounts, txns, 'partner', new Date(2026, 10, 1), new Date(2026, 10, 14, 12));
+    assert.deepEqual(s.rows.map(r => r.id), ['s-house']);
+    assert.equal(s.total, 360000);
+  },
 };
 
 let passed = 0;

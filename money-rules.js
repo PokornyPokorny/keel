@@ -57,4 +57,75 @@ export function classify(t) {
 export const liveRoundups = (txns, accountIds) =>
   txns.filter(t => t.attributes.description === 'Round Up' && cents(t) > 0 && accountIds.has(accountOf(t)));
 
+const balanceOf = a => Number(a.attributes.balance.valueInBaseUnits ?? Math.round(parseFloat(a.attributes.balance.value) * 100));
+const roundUpOf = t => { const a = t.attributes.roundUp?.amount; return a ? Number(a.valueInBaseUnits ?? Math.round(parseFloat(a.value) * 100)) : 0; };
+
+// Each account's balance at a moment: today's balance with every later transaction taken back out.
+// A purchase's round-up leaves the same account inside the purchase, so it comes back too
+// (up_dash.balance_history; without it the rewind drifts).
+export function balanceAt(accounts, txns, at) {
+  const bal = Object.fromEntries(accounts.map(a => [a.id, balanceOf(a)]));
+  for (const t of txns) {
+    const id = accountOf(t);
+    if (id in bal && when(t) > at) bal[id] -= cents(t) + roundUpOf(t);
+  }
+  return bal;
+}
+
+// Whose money each 2Up account holds: {accountId: {me, partner, unknown}} in cents (floats).
+// Replays the joint accounts oldest first (deposits before withdrawals at the same instant), one pot per
+// person, then scales to the real balance. Mirrors up_dash.joint_split.
+export function jointSplit(txns, accounts, people, until = null) {
+  const ownerOf = Object.fromEntries(accounts.map(a => [a.id, a.owner]));
+  const pots = Object.fromEntries(accounts.filter(a => a.owner === 'joint').map(a => [a.id, {}]));
+  const sum = pot => Object.values(pot).reduce((a, b) => a + b, 0);
+  const share = (pot, v) => { const s = sum(pot); return s > 0 ? Object.fromEntries(Object.entries(pot).map(([w, x]) => [w, v * x / s])) : { unknown: v }; };
+  const add = (pot, part) => { for (const [w, x] of Object.entries(part)) pot[w] = (pot[w] || 0) + x; };
+  const list = txns.filter(t => !until || when(t) <= until)
+    .sort((a, b) => (when(a) - when(b)) || ((cents(a) < 0) - (cents(b) < 0)));
+  for (const t of list) {
+    const pot = pots[accountOf(t)];
+    if (!pot) continue;
+    const v = cents(t);
+    if (v < 0) {
+      const s = sum(pot), keep = s > 0 ? Math.max(1 + v / s, 0) : 1;
+      for (const w in pot) pot[w] *= keep;
+      continue;
+    }
+    const src = t.relationships?.transferAccount?.data?.id ?? null;
+    if (ownerOf[src] === 'me' || ownerOf[src] === 'partner') add(pot, { [ownerOf[src]]: v });
+    else if (src && pots[src]) add(pot, share(pots[src], v));
+    else {
+      // no account to match: an outside payment naming who sent it, or interest and gifts (in proportion)
+      const by = (t.attributes.performingCustomer?.displayName || '').toLowerCase();
+      const who = ['me', 'partner'].find(k => people?.[k]?.surname && by.includes(people[k].surname.trim().toLowerCase()));
+      add(pot, who ? { [who]: v } : share(pot, v));
+    }
+  }
+  const bal = until ? balanceAt(accounts, txns, until) : Object.fromEntries(accounts.map(a => [a.id, balanceOf(a)]));
+  const out = {};
+  for (const [id, pot] of Object.entries(pots)) {
+    const pos = Object.fromEntries(Object.entries(pot).filter(([, x]) => x > 0)), s = sum(pos);
+    out[id] = s > 0 ? Object.fromEntries(Object.entries(pos).map(([w, x]) => [w, bal[id] * x / s])) : bal[id] ? { unknown: bal[id] } : {};
+  }
+  return out;
+}
+
+// The Savers panel for a view ('all' | 'me' | 'partner' | 'joint'), as at `at`, with this month's change.
+export function savers(accounts, txns, view, monthStart, at) {
+  const list = accounts.filter(a => a.attributes.accountType === 'SAVER' && (view === 'all' || a.owner === view));
+  const now = balanceAt(accounts, txns, at), start = balanceAt(accounts, txns, monthStart);
+  const rows = list.map(a => ({
+    id: a.id, name: a.attributes.displayName, owner: a.owner, kind: a.owner === 'joint' ? '2Up saver' : 'Saver',
+    balance: now[a.id], monthDelta: now[a.id] - start[a.id],
+  })).sort((a, b) => b.balance - a.balance);
+  const total = rows.reduce((s, r) => s + r.balance, 0);
+  for (const r of rows) r.share = total > 0 ? r.balance / total : 0;
+  const byOwner = { me: 0, partner: 0, joint: 0 };
+  for (const r of rows) byOwner[r.owner] += r.balance;
+  const ids = new Set(list.map(a => a.id));
+  const roundupsThisMonth = liveRoundups(txns, ids).filter(t => when(t) >= monthStart && when(t) <= at).reduce((s, t) => s + cents(t), 0);
+  return { total, byOwner, rows, savedThisMonth: rows.reduce((s, r) => s + r.monthDelta, 0), roundupsThisMonth };
+}
+
 export { dayKey };
