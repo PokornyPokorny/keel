@@ -16,44 +16,93 @@
 <style>
   html, body { margin: 0; height: 100%; background:#000; color: #fff; }
   [hidden] { display: none !important; } /* #lock sets display, which would otherwise beat the hidden attribute */
-  #lock { position: fixed; inset: 0; display: grid; place-items: center; }
-  #lock input {
-    width: 12ch; padding: 10px 0; border: 0; border-bottom: 1px solid #333;
-    background: transparent; color: #fff; font: 16px/1 ui-monospace, monospace;
-    text-align: center; letter-spacing: .1em; outline: none;
+  body { font-family: -apple-system, system-ui, sans-serif; -webkit-user-select: none; user-select: none; }
+
+  #lock {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 22px;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
   }
-  #lock input:focus { border-color: #888; }
+  #lock p { margin: 0; font-size: 20px; }
+  .dots { display: flex; gap: 22px; margin-bottom: 36px; }
+  .dots i { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid #fff; box-sizing: border-box; }
+  .dots i.on { background: #fff; }
+  .shake { animation: shake .4s; }
+  @keyframes shake { 20%, 60% { transform: translateX(-12px); } 40%, 80% { transform: translateX(12px); } }
+  @media (prefers-reduced-motion: reduce) { .shake { animation: none; } }
+
+  .pad { display: grid; grid-template-columns: repeat(3, 80px); gap: 16px 26px; }
+  .pad button {
+    width: 80px; height: 80px; border-radius: 50%; border: 0; padding: 0;
+    background: rgba(255,255,255,.16); color: #fff; font-family: inherit; font-size: 36px; line-height: 1; font-weight: 400;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation; cursor: pointer;
+    transition: background .25s;
+  }
+  .pad button:active { background: rgba(255,255,255,.45); transition: none; }
+  .pad button:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+  .pad .del { background: transparent; font-size: 17px; }
+  .pad .del:active { background: transparent; opacity: .5; }
 </style>
 </head>
 <body>
-<!-- shortcut: this is a curtain, not a lock. The repo is public, so anyone can read this file; real privacy comes from data living only in this device's storage. -->
-<form id="lock" hidden>
-  <input type="password" aria-label="Passcode" autocomplete="off" autocapitalize="off" spellcheck="false">
-</form>
+<!-- shortcut: this is a curtain, not a lock. The repo is public, so anyone can read this file, and a 6-digit code's hash is crackable in seconds; real privacy comes from data living only in this device's storage. -->
+<div id="lock" hidden>
+  <p>Enter Code</p>
+  <div class="dots" role="status" aria-label="0 of 6 digits entered"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="pad">
+    <button data-d="1">1</button><button data-d="2">2</button><button data-d="3">3</button>
+    <button data-d="4">4</button><button data-d="5">5</button><button data-d="6">6</button>
+    <button data-d="7">7</button><button data-d="8">8</button><button data-d="9">9</button>
+    <span></span><button data-d="0">0</button><button class="del" aria-label="Delete">Delete</button>
+  </div>
+</div>
 <main id="app" hidden></main>
 <script>
-  const HASH = 'e3c63e5834a33a112b5df311549b28864741d26b64c4bd90b7a8c0536125c7a2';
+  const HASH = '8e5ca37a82414c72f3ae131ee88a8ac6eb3ea9d1ab3bdb56e351c1255fae1536';
   const KEY = 'keel-unlocked';
+  const LEN = 6;
   const lock = document.getElementById('lock');
   const app = document.getElementById('app');
-  const input = lock.querySelector('input');
+  const dotsEl = lock.querySelector('.dots');
+  const dots = [...dotsEl.children];
+  let entry = '';
 
   const sha256 = async s => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))]
     .map(b => b.toString(16).padStart(2, '0')).join('');
   const isUnlocked = () => { try { return localStorage.getItem(KEY) === HASH; } catch { return false; } };
   const open = () => { lock.hidden = true; app.hidden = false; };
+  const render = () => {
+    dots.forEach((d, i) => d.classList.toggle('on', i < entry.length));
+    dotsEl.setAttribute('aria-label', `${entry.length} of ${LEN} digits entered`);
+  };
 
-  if (isUnlocked()) open(); else { lock.hidden = false; input.focus(); }
-
-  lock.addEventListener('submit', async e => {
-    e.preventDefault();
-    if (await sha256(input.value.trim().toLowerCase()) === HASH) {
+  async function press(d) {
+    if (entry.length >= LEN) return; // full: checking, or showing a wrong-code shake
+    entry += d; render();
+    if (entry.length < LEN) return;
+    if (await sha256(entry) === HASH) {
       try { localStorage.setItem(KEY, HASH); } catch {}
       open();
     } else {
-      input.value = '';
+      dotsEl.classList.remove('shake'); void dotsEl.offsetWidth; dotsEl.classList.add('shake');
+      navigator.vibrate?.(150);
+      setTimeout(() => { entry = ''; render(); }, 400);
     }
+  }
+  const del = () => { if (entry.length < LEN) { entry = entry.slice(0, -1); render(); } };
+
+  lock.querySelector('.pad').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.d) press(b.dataset.d); else del();
   });
+  document.addEventListener('keydown', e => {
+    if (lock.hidden) return;
+    if (/^\d$/.test(e.key)) press(e.key);
+    else if (e.key === 'Backspace') del();
+  });
+
+  if (isUnlocked()) open(); else lock.hidden = false;
 </script>
 </body>
 </html>
